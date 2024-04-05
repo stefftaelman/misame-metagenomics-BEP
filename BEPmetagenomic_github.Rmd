@@ -1029,7 +1029,7 @@ prenatal_dist <- UniFrac(prenatal, weighted = T, normalized = TRUE, parallel = F
 vegan::adonis2(prenatal_dist ~ phyloseq::sample_data(prenatal)$timepoint + phyloseq::sample_data(prenatal)$code)
 ```
 
-### prenatal
+### postnatal
 ```{r}
 postnatal_ord <- phyloseq::ordinate(postnatal, "PCoA", "unifrac", weighted=T)
 phyloseq::plot_scree(postnatal_ord) + geom_bar(stat = "identity", fill="blue") + labs(x="\nAxis", y="Proportion of Variance\n")
@@ -3118,6 +3118,7 @@ Before we start modelling, we perform a few formatting steps on the data.
 3. We combine everything into TreeSummarizedExperiment (TSE) R objects.
 
 ### maternal
+
 ```{r splitting data maternal, include=FALSE}
 # metadata
 metadata_mat <- metadata[metadata$child == "no", ]
@@ -3149,66 +3150,79 @@ metadata_mat_pn56 <- metadata_mat_pn56[colnames(gene_counts_mat_pn56), ]
 
 
 ### infant
-```{r transforming infant, include=FALSE}
-# TSS
-scaled_counts_inf_pn12 <- data.frame(
-  scaled_integer_transform_counts(prop.table(as.matrix(gene_counts_inf_pn12), 2))
+
+```{r splitting data infant, include=FALSE}
+# metadata
+metadata_inf <- metadata[metadata$child == "yes", ]
+metadata_inf_pn12 <- metadata_inf[metadata_inf$timepoint == "pn12", ]
+metadata_inf_pn56 <- metadata_inf[metadata_inf$timepoint == "pn56", ]
+
+# counts
+gene_counts_inf <- gene_counts[, rownames(metadata_inf)]
+gene_counts_inf <- gene_counts_inf[rowSums(gene_counts_inf) != 0, ]
+gene_counts_inf_pn12 <- gene_counts_inf[, rownames(metadata_inf_pn12)]
+gene_counts_inf_pn56 <- gene_counts_inf[, rownames(metadata_inf_pn56)]
+
+# hierarchy
+anno_inf <- gene_anno[rownames(gene_counts_inf), ]
+phylogenetic_tree_inf <- TreeSummarizedExperiment::toTree(
+  data = anno_inf
   )
-scaled_counts_inf_pn56 <- data.frame(
-  scaled_integer_transform_counts(prop.table(as.matrix(gene_counts_inf_pn56), 2))
-  )
+
+# fix order
+metadata_inf_pn12 <- metadata_inf_pn12[colnames(gene_counts_inf_pn12), ]
+metadata_inf_pn56 <- metadata_inf_pn56[colnames(gene_counts_inf_pn56), ]
 ```
 
 ## TSE TreeSummarizedExperiment
 ### infant
+
 ```{r TSE objects infant, include=FALSE}
-# TSS
-tse_object_scaled_inf_pn12 <- TreeSummarizedExperiment::TreeSummarizedExperiment(
-  assays = list(count = as.matrix(scaled_counts_inf_pn12)),
+tse_object_inf_pn12 <- TreeSummarizedExperiment::TreeSummarizedExperiment(
+  assays = list(count = as.matrix(gene_counts_inf_pn12)),
   rowData = anno_inf,
   colData = metadata_inf_pn12,
   rowTree = phylogenetic_tree_inf,
-  rowNodeLab = rownames(scaled_counts_inf_pn12)
+  rowNodeLab = rownames(gene_counts_inf_pn12)
 )
-tse_object_scaled_inf_pn56 <- TreeSummarizedExperiment::TreeSummarizedExperiment(
-  assays = list(count = as.matrix(scaled_counts_inf_pn56)),
+tse_object_inf_pn56 <- TreeSummarizedExperiment::TreeSummarizedExperiment(
+  assays = list(count = as.matrix(gene_counts_inf_pn56)),
   rowData = anno_inf,
   colData = metadata_inf_pn56,
   rowTree = phylogenetic_tree_inf,
-  rowNodeLab = rownames(scaled_counts_inf_pn56)
+  rowNodeLab = rownames(gene_counts_inf_pn56)
 )
 ```
 
 ### maternal
 ```{r TSE objects maternal, include=FALSE}
-# TSS objects
-tse_object_scaled_mat_incl <- TreeSummarizedExperiment::TreeSummarizedExperiment(
-  assays = list(count = as.matrix(scaled_counts_mat_incl)),
+tse_object_mat_incl <- TreeSummarizedExperiment::TreeSummarizedExperiment(
+  assays = list(count = as.matrix(gene_counts_mat_incl)),
   rowData = anno_mat,
   colData = metadata_mat_incl,
   rowTree = phylogenetic_tree_mat,
-  rowNodeLab = rownames(scaled_counts_mat_incl)
+  rowNodeLab = rownames(gene_counts_mat_incl)
 )
-tse_object_scaled_mat_tri3 <- TreeSummarizedExperiment::TreeSummarizedExperiment(
-  assays = list(count = as.matrix(scaled_counts_mat_tri3)),
+tse_object_mat_tri3 <- TreeSummarizedExperiment::TreeSummarizedExperiment(
+  assays = list(count = as.matrix(gene_counts_mat_tri3)),
   rowData = anno_mat,
   colData = metadata_mat_tri3,
   rowTree = phylogenetic_tree_mat,
-  rowNodeLab = rownames(scaled_counts_mat_tri3)
+  rowNodeLab = rownames(gene_counts_mat_tri3)
 )
-tse_object_scaled_mat_pn12 <- TreeSummarizedExperiment::TreeSummarizedExperiment(
-  assays = list(count = as.matrix(scaled_counts_mat_pn12)),
+tse_object_mat_pn12 <- TreeSummarizedExperiment::TreeSummarizedExperiment(
+  assays = list(count = as.matrix(gene_counts_mat_pn12)),
   rowData = anno_mat,
   colData = metadata_mat_pn12,
   rowTree = phylogenetic_tree_mat,
-  rowNodeLab = rownames(scaled_counts_mat_pn12)
+  rowNodeLab = rownames(gene_counts_mat_pn12)
 )
-tse_object_scaled_mat_pn56 <- TreeSummarizedExperiment::TreeSummarizedExperiment(
-  assays = list(count = as.matrix(scaled_counts_mat_pn56)),
+tse_object_mat_pn56 <- TreeSummarizedExperiment::TreeSummarizedExperiment(
+  assays = list(count = as.matrix(gene_counts_mat_pn56)),
   rowData = anno_mat,
   colData = metadata_mat_pn56,
   rowTree = phylogenetic_tree_mat,
-  rowNodeLab = rownames(scaled_counts_mat_pn56)
+  rowNodeLab = rownames(gene_counts_mat_pn56)
 )
 ```
 
@@ -3216,7 +3230,7 @@ tse_object_scaled_mat_pn56 <- TreeSummarizedExperiment::TreeSummarizedExperiment
 ## Modelling
 We can group genes into specific hierarchies based on enzymatic classes, metabolic function etc. and test across these hierarchic levels This can help to find specific functional classes that are differential as a whole where the individual gene would not have showed up, testing all levels increases the false discovery rate and can have issues of multicolinearity. treeclimbR solves this by precomputing the most interesting candidates to test for differential abundance ([Huang et al., 2021](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-021-02368-1)).
 
-```{r volcano plot function, include=FALSE}
+```{r plotting functions, include=FALSE}
 #' Create a volcano plot from the outputs of a differential abundance analysis
 #'
 #' @param results A list containing the DA results as outputted in the
@@ -3229,9 +3243,9 @@ We can group genes into specific hierarchies based on enzymatic classes, metabol
 #' @examples volcano_plot(results, color_scheme)
 #' @export
 volcano_plot <- function(results,
-                         alpha = 0.1,
-                         effect_cutoff = 2,
-                         color_scheme, 
+                         alpha = 0.05,
+                         effect_cutoff = 1,
+                         color_scheme,
                          title = "Differential abundance analysis: Volcano plot") {
   # extract elements
   scores <- results$output
@@ -3240,13 +3254,13 @@ volcano_plot <- function(results,
   volcano_plot_df <- scores %>%
     mutate(
       significance_group = dplyr::if_else(
-        abs(logFC) < effect_cutoff & PValue > alpha,
+        abs(logFC) < effect_cutoff & adj.p > alpha,
         "Non-significant",
         dplyr::if_else(
           abs(logFC) < effect_cutoff,
-          "Statistically significant (p-values)",
+          "Statistically significant (q-values)",
           dplyr::if_else(
-            PValue > alpha,
+            adj.p > alpha,
             "Biologically significant (FC)",
             "Biologically & statistically significant"
           )
@@ -3254,7 +3268,7 @@ volcano_plot <- function(results,
       ),
       text = paste0(
         "Taxon: ", names, "\n",
-        "p-value: ", PValue, "\n",
+        "q-value: ", adj.p, "\n",
         "log FC: ", round(logFC, 4), "\n"
       )
     )
@@ -3262,7 +3276,7 @@ volcano_plot <- function(results,
   p <- ggplot2::ggplot(
     volcano_plot_df,
     ggplot2::aes(
-      x = logFC, y = -log10(PValue),
+      x = logFC, y = -log10(adj.p),
       color = significance_group,
       text = text
     )
@@ -3273,14 +3287,14 @@ volcano_plot <- function(results,
       values = c(
         "Non-significant" = "#9EA0A5",
         "Biologically significant (FC)" = color_scheme[1],
-        "Statistically significant (p-values)" = color_scheme[3],
+        "Statistically significant (q-values)" = color_scheme[3],
         "Biologically & statistically significant" = color_scheme[2]
       )
     ) +
     ggplot2::labs(
       title = title,
       x = "Fold change (Log2)",
-      y = "p-value (-Log10)"
+      y = "Q-value (-Log10)"
     ) +
     ggplot2::theme(
       plot.title = ggplot2::element_text(face = "bold"),
@@ -3301,452 +3315,406 @@ volcano_plot <- function(results,
 
   return(plotly::ggplotly(p, tooltip = "text"))
 }
+
+enrichment_lollipop <- function(gsea_results) {
+  # extract dataframe from GSEA results
+  data <- gsea_results@result
+  # make ID a factor in the order of increasing enrichment score
+  data$ID <- factor(data$ID, levels = data$ID[order(data$enrichmentScore)])
+  # plot lollipop figure
+  p <- ggplot2::ggplot(
+    data,
+    ggplot2::aes(
+      x = enrichmentScore,
+      y = ID,
+      color = p.adjust,
+      size = setSize
+      )
+    ) +
+    ggplot2::geom_segment(
+      ggplot2::aes(x=0, xend=enrichmentScore, y=ID, yend=ID),
+      size = 0.5,
+      color="gray"
+    ) +
+    ggplot2::geom_vline(xintercept = 0, linetype="dashed", color=COLOR_SCHEME[5]) +
+    ggplot2::geom_point() +
+    ggplot2::theme_bw() +
+    ggplot2::theme(
+      legend.text = ggplot2::element_text(size = 10),
+      legend.position = "none", 
+      panel.border = ggplot2::element_rect(colour = "black", fill=NA, size=3)
+    ) +
+    ggplot2::labs(x="", y="") +
+    ggplot2::scale_x_continuous(limits=c(-1.02, 1.02), expand=c(0, 0)) +
+    ggplot2::lims(size = c(0, 140)) +
+    ggplot2::scale_color_gradientn(
+      name="Adjusted p-value",
+      colors=c(COLOR_SCHEME[c(3, 1, 2, 4)]),
+      limits = c(0, 0.05)
+      )
+  return(p)
+}
 ```
 
 
 ### Mothers
 
-#### incl
-```{r treeclimbR maternal incl TSS, include=FALSE}
-res_scaled_mat_incl <- treeclimbR::runDA(
-  TSE = tse_object_scaled_mat_incl,
+### at inclusion
+
+```{r treeclimbR maternal incl, include=FALSE}
+res_mat_incl <- treeclimbR::runDA(
+  TSE = tse_object_mat_incl,
   feature_on_row = TRUE,
   assay = 1,
-  design_terms = "code"
+  design_terms = "code",
+  normalize_method = "TMM"
   )
-res_table_scaled_mat_incl <- treeclimbR::nodeResult(
-  object = res_scaled_mat_incl,
+res_table_mat_incl <- treeclimbR::nodeResult(
+  object = res_mat_incl,
   n = Inf
   )
-candidates_scaled_mat_incl <- treeclimbR::getCand(
-  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_mat_incl),
-  score_data = res_table_scaled_mat_incl,
+candidates_mat_incl <- treeclimbR::getCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_mat_incl),
+  score_data = res_table_mat_incl,
   node_column = "node",
   p_column = "PValue",
   sign_column = "logFC"
   )
-da_results_scaled_mat_incl <- treeclimbR::evalCand(
-  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_mat_incl),
+da_results_mat_incl <- treeclimbR::evalCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_mat_incl),
   type = "single",
-  levels = candidates_scaled_mat_incl$candidate_list,
-  limit_rej = 0.1,
-  score_data = res_table_scaled_mat_incl,
+  levels = candidates_mat_incl$candidate_list,
+  limit_rej = 0.05,
+  score_data = res_table_mat_incl,
   node_column = "node",
   p_column = "PValue",
   sign_column = "logFC",
   use_pseudo_leaf = FALSE
   )
 
-da_results_scaled_mat_incl$output$names <- TreeSummarizedExperiment::convertNode(
+da_results_mat_incl$output$names <- TreeSummarizedExperiment::convertNode(
   phylogenetic_tree_mat,
-  da_results_scaled_mat_incl$output$node
+  da_results_mat_incl$output$node
   )
+da_results_mat_incl$output
 ```
 
 
-##### Volcano plot
-```{r plot volcano maternal incl TSS, echo=FALSE}
-# permutation based False Discovery Proportion estimation
-fdr_thresh_scaled_mat_incl <- permFDP::permFDP.adjust.threshold(
-  pVals = da_results_scaled_mat_incl$output$PValue,
-  threshold = 0.1,
-  myDesign = ifelse(metadata_mat_incl[colnames(scaled_counts_mat_incl), "code"] == "A Y", 1, 2),
-  intOnly = scaled_counts_mat_incl[da_results_scaled_mat_incl$output$names, ],
-  nPerms = 999
-)
+```{r plot volcano maternal incl, echo=FALSE}
 # plot
-p_scaled_mat_incl <- volcano_plot(
-  da_results_scaled_mat_incl, 
-  alpha = fdr_thresh_scaled_mat_incl, 
-  color_scheme = COLOR_SCHEME, 
-  title = "Differential functions at incl - Mother (TSS transformed)")
-p_scaled_mat_incl
-
-# adjusted p-values plot
-gene_daa_incl <- da_results_scaled_mat_incl$output
-DT::datatable(gene_daa_incl)
-
-gene_volcano_incl <- gene_daa_incl |>
-  mutate(`adj.p`=-log10(`adj.p`)) |>
-  mutate(label=if_else(abs(`logFC`)>2, names, NA_character_)) |>
-  mutate(label=if_else(`adj.p` >1.3, names, NA_character_)) |>
-  mutate(color=if_else(`logFC`>0, "#FF9E4A", "#729ECE")) |>
-  mutate(color=if_else(is.na(label), "#000000", color)) |>
-  ggplot(mapping = aes(`logFC`, `adj.p`, color=I(color), label=label, shape=I(1))) +
-  geom_point() +
-  geom_hline(linetype = "dotted", yintercept = 1.3) +
-  geom_vline(linetype = "dotted", xintercept = 2) +
-  geom_vline(linetype = "dotted", xintercept = -2) +
-  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
-  labs(title = "treeclimbR, maternal samples at incl, gene counts",
-       x = expression(~Log[2]~FoldChange),
-       y = expression(-~Log[10]~Q)) +
-  theme_bw()
-gene_volcano_incl
-
+p_mat_incl <- volcano_plot(
+  da_results_mat_incl, 
+  alpha = 0.05,
+  color_scheme = COLOR_SCHEME,
+  title = "Differential functions at incl - Mother (TMM transformed)")
+p_mat_incl
 ```
 
 
-##### GSEA
-```{r GSEA maternal incl TSS, echo=FALSE}
-tmp <- data.frame(da_results_scaled_mat_incl$output[, c("logFC", "names")])
+```{r GSEA maternal incl, echo=FALSE}
+tmp <- data.frame(da_results_mat_incl$output[, c("logFC", "names")])
 # the DA lists also include CARD, CAZyme, and HMO genes, but we only have mappings for KEGG atm
 kegg_genes_tmp <- tmp$names %in% gene_anno[gene_anno$database == "KEGG", "anno"]
 tmp <- tmp[kegg_genes_tmp, ]
-gene_list_scaled_mat_incl <- tmp[,1]
-names(gene_list_scaled_mat_incl) <- as.character(tmp[, 2])
-gene_list_scaled_mat_incl <- sort(gene_list_scaled_mat_incl, decreasing = TRUE)
+gene_list_mat_incl <- tmp[,1]
+names(gene_list_mat_incl) <- as.character(tmp[, 2])
+gene_list_mat_incl <- sort(gene_list_mat_incl, decreasing = TRUE)
 
-kk_scaled_mat_incl <- clusterProfiler::GSEA(
-  gene_list_scaled_mat_incl, 
+kk_mat_incl <- clusterProfiler::GSEA(
+  gene_list_mat_incl, 
   TERM2GENE = pathway_to_gene,  
   TERM2NAME = pathway_to_description,
-  pvalueCutoff = 0.1,
+  pvalueCutoff = 0.05,
   minGSSize = 1
   )
-DT::datatable(kk_scaled_mat_incl@result)
-vis <- nrow(kk_scaled_mat_incl@result) > 0 # only run plots if there are results
+# output tables
+DT::datatable(kk_mat_incl@result)
+enriched_genesets <- base::intersect(
+  names(kk_mat_incl@geneSets), 
+  kk_mat_incl@result$ID
+  )
+for (set in enriched_genesets){
+  enriched_genes <- as.data.frame(
+    na.omit(kk_mat_incl@geneList[unlist(kk_mat_incl@geneSets[set])])
+    )
+  colnames(enriched_genes) <-  "logFC"
+}
+```
 
-enrich_incl <- enrichplot::dotplot(
-  kk_scaled_mat_incl, 
-  x = "enrichmentScore", 
-  title = "Differential pathways at incl - Mother"
-  ) + xlim(-1, 1)
 
-enrichplot::ridgeplot(kk_scaled_mat_incl)
-
+```{r GSEA plot maternal incl, echo=FALSE}
+enrichment_lollipop(kk_mat_incl)
 ```
 
 
 #### tri3
-```{r treeclimbR maternal tri3 TSS, include=FALSE}
-res_scaled_mat_tri3 <- treeclimbR::runDA(
-  TSE = tse_object_scaled_mat_tri3,
+
+```{r treeclimbR maternal tri3, include=FALSE}
+res_mat_tri3 <- treeclimbR::runDA(
+  TSE = tse_object_mat_tri3,
   feature_on_row = TRUE,
   assay = 1,
-  design_terms = "code"
+  design_terms = "code",
+  normalize_method = "TMM"
   )
-res_table_scaled_mat_tri3 <- treeclimbR::nodeResult(
-  object = res_scaled_mat_tri3,
+res_table_mat_tri3 <- treeclimbR::nodeResult(
+  object = res_mat_tri3,
   n = Inf
   )
-candidates_scaled_mat_tri3 <- treeclimbR::getCand(
-  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_mat_tri3),
-  score_data = res_table_scaled_mat_tri3,
+candidates_mat_tri3 <- treeclimbR::getCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_mat_tri3),
+  score_data = res_table_mat_tri3,
   node_column = "node",
   p_column = "PValue",
   sign_column = "logFC"
   )
-da_results_scaled_mat_tri3 <- treeclimbR::evalCand(
-  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_mat_tri3),
+da_results_mat_tri3 <- treeclimbR::evalCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_mat_tri3),
   type = "single",
-  levels = candidates_scaled_mat_tri3$candidate_list,
-  limit_rej = 0.1,
-  score_data = res_table_scaled_mat_tri3,
+  levels = candidates_mat_tri3$candidate_list,
+  limit_rej = 0.05,
+  score_data = res_table_mat_tri3,
   node_column = "node",
   p_column = "PValue",
   sign_column = "logFC",
   use_pseudo_leaf = FALSE
   )
 
-da_results_scaled_mat_tri3$output$names <- TreeSummarizedExperiment::convertNode(
+da_results_mat_tri3$output$names <- TreeSummarizedExperiment::convertNode(
   phylogenetic_tree_mat,
-  da_results_scaled_mat_tri3$output$node
+  da_results_mat_tri3$output$node
   )
+da_results_mat_tri3$output
 ```
 
-##### Volcano plot
-```{r plot volcano maternal tri3 TSS, echo=FALSE}
-# permutation based False Discovery Proportion estimation
-fdr_thresh_scaled_mat_tri3 <- permFDP::permFDP.adjust.threshold(
-  pVals = da_results_scaled_mat_tri3$output$PValue,
-  threshold = 0.1,
-  myDesign = ifelse(metadata_mat_tri3[colnames(scaled_counts_mat_tri3), "code"] == "A Y", 1, 2),
-  intOnly = scaled_counts_mat_tri3[da_results_scaled_mat_tri3$output$names, ],
-  nPerms = 999
-)
+
+```{r plot volcano maternal tri3, echo=FALSE}
 # plot
-p_scaled_mat_tri3 <- volcano_plot(
-  da_results_scaled_mat_tri3, 
-  alpha = fdr_thresh_scaled_mat_tri3, 
-  color_scheme = COLOR_SCHEME, 
-  title = "Differential functions at tri3 - Mother (TSS transformed)")
-p_scaled_mat_tri3
-
-# adjusted p-values plot
-gene_daa_tri3 <- da_results_scaled_mat_tri3$output
-DT::datatable(gene_daa_tri3)
-
-gene_volcano_tri3 <- gene_daa_tri3 |>
-  mutate(`adj.p`=-log10(`adj.p`)) |>
-  mutate(label=if_else(abs(`logFC`)>2, names, NA_character_)) |>
-  mutate(label=if_else(`adj.p` >1.3, names, NA_character_)) |>
-  mutate(color=if_else(`logFC`>0, "#FF9E4A", "#729ECE")) |>
-  mutate(color=if_else(is.na(label), "#000000", color)) |>
-  ggplot(mapping = aes(`logFC`, `adj.p`, color=I(color), label=label, shape=I(1))) +
-  geom_point() +
-  geom_hline(linetype = "dotted", yintercept = 1.3) +
-  geom_vline(linetype = "dotted", xintercept = 2) +
-  geom_vline(linetype = "dotted", xintercept = -2) +
-  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
-  labs(title = "treeclimbR, maternal samples at tri3, gene counts",
-       x = expression(~Log[2]~FoldChange),
-       y = expression(-~Log[10]~Q)) +
-  theme_bw()
-gene_volcano_tri3
-
+p_mat_tri3 <- volcano_plot(
+  da_results_mat_tri3, 
+  alpha = 0.05,
+  color_scheme = COLOR_SCHEME,
+  title = "Differential functions at tri3 - Mother (TMM transformed)")
+p_mat_tri3
 ```
 
 
-##### GSEA
-```{r GSEA maternal tri3 TSS, echo=FALSE}
-tmp <- data.frame(da_results_scaled_mat_tri3$output[, c("logFC", "names")])
+```{r GSEA maternal tri3, echo=FALSE}
+tmp <- data.frame(da_results_mat_tri3$output[, c("logFC", "names")])
 # the DA lists also include CARD, CAZyme, and HMO genes, but we only have mappings for KEGG atm
 kegg_genes_tmp <- tmp$names %in% gene_anno[gene_anno$database == "KEGG", "anno"]
 tmp <- tmp[kegg_genes_tmp, ]
-gene_list_scaled_mat_tri3 <- tmp[,1]
-names(gene_list_scaled_mat_tri3) <- as.character(tmp[, 2])
-gene_list_scaled_mat_tri3 <- sort(gene_list_scaled_mat_tri3, decreasing = TRUE)
+gene_list_mat_tri3 <- tmp[,1]
+names(gene_list_mat_tri3) <- as.character(tmp[, 2])
+gene_list_mat_tri3 <- sort(gene_list_mat_tri3, decreasing = TRUE)
 
-kk_scaled_mat_tri3 <- clusterProfiler::GSEA(
-  gene_list_scaled_mat_tri3, 
-  TERM2GENE = pathway_to_gene,  
+kk_mat_tri3 <- clusterProfiler::GSEA(
+  gene_list_mat_tri3,
+  TERM2GENE = pathway_to_gene,
   TERM2NAME = pathway_to_description,
-  pvalueCutoff = 0.1,
+  pvalueCutoff = 0.05,
   minGSSize = 1
   )
-DT::datatable(kk_scaled_mat_tri3@result)
-vis <- nrow(kk_scaled_mat_tri3@result) > 0 # only run plots if there are results
-
-enrich_tri3 <- enrichplot::dotplot(
-  kk_scaled_mat_tri3, 
-  x = "enrichmentScore", 
-  title = "Differential pathways at tri3 - Mother"
-  ) + xlim(-1, 1)
-
-enrichplot::ridgeplot(kk_scaled_mat_tri3)
-
+# output tables
+DT::datatable(kk_mat_tri3@result)
+enriched_genesets <- base::intersect(
+  names(kk_mat_tri3@geneSets),
+  kk_mat_tri3@result$ID
+  )
+for (set in enriched_genesets){
+  enriched_genes <- as.data.frame(
+    na.omit(kk_mat_tri3@geneList[unlist(kk_mat_tri3@geneSets[set])])
+    )
+  colnames(enriched_genes) <-  "logFC"
+  enriched_genes$gene <- rownames(enriched_genes)
+  cmap <- c(COLOR_SCHEME[c(3, 1)], "white", COLOR_SCHEME[c(2, 4)])
+  lms <- c(-0.3, 0.3)
+  p <- ggplot2::ggplot(enriched_genes, ggplot2::aes(x=1, y=gene, color=logFC)) +
+    ggplot2::geom_jitter(size=5) +
+    ggplot2::scale_color_gradientn(colors=cmap, limits=lms)
+  p
+}
 ```
 
 
-#### pn12m
-```{r treeclimbR maternal pn12m TSS, include=FALSE}
-res_scaled_mat_pn12 <- treeclimbR::runDA(
-  TSE = tse_object_scaled_mat_pn12,
+```{r GSEA plot maternal tri3, echo=FALSE}
+enrichment_lollipop(kk_mat_tri3)
+```
+
+
+#### postnatal 1-2 months
+
+```{r treeclimbR maternal pn12, include=FALSE}
+res_mat_pn12 <- treeclimbR::runDA(
+  TSE = tse_object_mat_pn12,
   feature_on_row = TRUE,
   assay = 1,
-  design_terms = "code"
+  design_terms = "code",
+  normalize_method = "TMM"
   )
-res_table_scaled_mat_pn12 <- treeclimbR::nodeResult(
-  object = res_scaled_mat_pn12,
+res_table_mat_pn12 <- treeclimbR::nodeResult(
+  object = res_mat_pn12,
   n = Inf
   )
-candidates_scaled_mat_pn12 <- treeclimbR::getCand(
-  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_mat_pn12),
-  score_data = res_table_scaled_mat_pn12,
+candidates_mat_pn12 <- treeclimbR::getCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_mat_pn12),
+  score_data = res_table_mat_pn12,
   node_column = "node",
   p_column = "PValue",
   sign_column = "logFC"
   )
-da_results_scaled_mat_pn12 <- treeclimbR::evalCand(
-  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_mat_pn12),
+da_results_mat_pn12 <- treeclimbR::evalCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_mat_pn12),
   type = "single",
-  levels = candidates_scaled_mat_pn12$candidate_list,
-  limit_rej = 0.1,
-  score_data = res_table_scaled_mat_pn12,
+  levels = candidates_mat_pn12$candidate_list,
+  limit_rej = 0.05,
+  score_data = res_table_mat_pn12,
   node_column = "node",
   p_column = "PValue",
   sign_column = "logFC",
   use_pseudo_leaf = FALSE
   )
 
-da_results_scaled_mat_pn12$output$names <- TreeSummarizedExperiment::convertNode(
+da_results_mat_pn12$output$names <- TreeSummarizedExperiment::convertNode(
   phylogenetic_tree_mat,
-  da_results_scaled_mat_pn12$output$node
+  da_results_mat_pn12$output$node
   )
+da_results_mat_pn12$output
 ```
 
-##### Volcano plot
-```{r plot volcano maternal pn12 TSS, echo=FALSE}
-# permutation based False Discovery Proportion estimation
-fdr_thresh_scaled_mat_pn12 <- permFDP::permFDP.adjust.threshold(
-  pVals = da_results_scaled_mat_pn12$output$PValue,
-  threshold = 0.1,
-  myDesign = ifelse(metadata_mat_pn12[colnames(scaled_counts_mat_pn12), "code"] == "A Y", 1, 2),
-  intOnly = scaled_counts_mat_pn12[da_results_scaled_mat_pn12$output$names, ],
-  nPerms = 999
-)
+
+```{r plot volcano maternal pn12, echo=FALSE}
 # plot
-p_scaled_mat_pn12 <- volcano_plot(
-  da_results_scaled_mat_pn12, 
-  alpha = fdr_thresh_scaled_mat_pn12, 
+p_mat_pn12 <- volcano_plot(
+  da_results_mat_pn12, 
+  alpha = 0.05,
   color_scheme = COLOR_SCHEME, 
-  title = "Differential functions at pn12 - Mother (TSS transformed)")
-p_scaled_mat_pn12
-
-# adjusted p-values plot
-gene_daa_pn12m <- da_results_scaled_mat_pn12$output
-DT::datatable(gene_daa_pn12m)
-
-gene_volcano_pn12m <- gene_daa_pn12m |>
-  mutate(`adj.p`=-log10(`adj.p`)) |>
-  mutate(label=if_else(abs(`logFC`)>2, names, NA_character_)) |>
-  mutate(label=if_else(`adj.p` >1.3, names, NA_character_)) |>
-  mutate(color=if_else(`logFC`>0, "#FF9E4A", "#729ECE")) |>
-  mutate(color=if_else(is.na(label), "#000000", color)) |>
-  ggplot(mapping = aes(`logFC`, `adj.p`, color=I(color), label=label, shape=I(1))) +
-  geom_point() +
-  geom_hline(linetype = "dotted", yintercept = 1.3) +
-  geom_vline(linetype = "dotted", xintercept = 2) +
-  geom_vline(linetype = "dotted", xintercept = -2) +
-  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
-  labs(title = "treeclimbR, maternal samples at pn12m, gene counts",
-       x = expression(~Log[2]~FoldChange),
-       y = expression(-~Log[10]~Q)) +
-  theme_bw()
-gene_volcano_pn12m
-
+  title = "Differential functions at pn12 - Mother (TMM transformed)")
+p_mat_pn12
 ```
 
 
-##### GSEA
-```{r GSEA maternal pn12 TSS, echo=FALSE}
-tmp <- data.frame(da_results_scaled_mat_pn12$output[, c("logFC", "names")])
+```{r GSEA maternal pn12, echo=FALSE}
+tmp <- data.frame(da_results_mat_pn12$output[, c("logFC", "names")])
 # the DA lists also include CARD, CAZyme, and HMO genes, but we only have mappings for KEGG atm
 kegg_genes_tmp <- tmp$names %in% gene_anno[gene_anno$database == "KEGG", "anno"]
 tmp <- tmp[kegg_genes_tmp, ]
-gene_list_scaled_mat_pn12 <- tmp[,1]
-names(gene_list_scaled_mat_pn12) <- as.character(tmp[, 2])
-gene_list_scaled_mat_pn12 <- sort(gene_list_scaled_mat_pn12, decreasing = TRUE)
+gene_list_mat_pn12 <- tmp[,1]
+names(gene_list_mat_pn12) <- as.character(tmp[, 2])
+gene_list_mat_pn12 <- sort(gene_list_mat_pn12, decreasing = TRUE)
 
-kk_scaled_mat_pn12 <- clusterProfiler::GSEA(
-  gene_list_scaled_mat_pn12, 
+kk_mat_pn12 <- clusterProfiler::GSEA(
+  gene_list_mat_pn12, 
   TERM2GENE = pathway_to_gene,  
   TERM2NAME = pathway_to_description,
-  pvalueCutoff = 0.1,
+  pvalueCutoff = 0.05,
   minGSSize = 1
   )
-DT::datatable(kk_scaled_mat_pn12@result)
-vis <- nrow(kk_scaled_mat_pn12@result) > 0 # only run plots if there are results
-
-enrich_pn12m <- enrichplot::dotplot(
-  kk_scaled_mat_pn12, 
-  x = "enrichmentScore", 
-  title = "Differential pathways at pn12 - Mother"
-  ) + xlim(-1, 1)
-enrichplot::ridgeplot(kk_scaled_mat_pn12)
-
+# output tables
+DT::datatable(kk_mat_pn12@result)
+enriched_genesets <- base::intersect(
+  names(kk_mat_pn12@geneSets),
+  kk_mat_pn12@result$ID
+  )
+for (set in enriched_genesets){
+  enriched_genes <- as.data.frame(
+    na.omit(kk_mat_pn12@geneList[unlist(kk_mat_pn12@geneSets[set])])
+    )
+  colnames(enriched_genes) <- "logFC"
+}
 ```
 
 
-#### pn56m
-```{r treeclimbR maternal pn56m TSS, include=FALSE}
-res_scaled_mat_pn56 <- treeclimbR::runDA(
-  TSE = tse_object_scaled_mat_pn56,
+```{r GSEA plot maternal pn12, echo=FALSE}
+enrichment_lollipop(kk_mat_pn12)
+```
+
+
+#### postnatal 5-6 months
+
+```{r treeclimbR maternal pn56, include=FALSE}
+res_mat_pn56 <- treeclimbR::runDA(
+  TSE = tse_object_mat_pn56,
   feature_on_row = TRUE,
   assay = 1,
-  design_terms = "code"
+  design_terms = "code",
+  normalize_method = "TMM"
   )
-res_table_scaled_mat_pn56 <- treeclimbR::nodeResult(
-  object = res_scaled_mat_pn56,
+res_table_mat_pn56 <- treeclimbR::nodeResult(
+  object = res_mat_pn56,
   n = Inf
   )
-candidates_scaled_mat_pn56 <- treeclimbR::getCand(
-  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_mat_pn56),
-  score_data = res_table_scaled_mat_pn56,
+candidates_mat_pn56 <- treeclimbR::getCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_mat_pn56),
+  score_data = res_table_mat_pn56,
   node_column = "node",
   p_column = "PValue",
   sign_column = "logFC"
   )
-da_results_scaled_mat_pn56 <- treeclimbR::evalCand(
-  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_mat_pn56),
+da_results_mat_pn56 <- treeclimbR::evalCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_mat_pn56),
   type = "single",
-  levels = candidates_scaled_mat_pn56$candidate_list,
-  limit_rej = 0.1,
-  score_data = res_table_scaled_mat_pn56,
+  levels = candidates_mat_pn56$candidate_list,
+  limit_rej = 0.05,
+  score_data = res_table_mat_pn56,
   node_column = "node",
   p_column = "PValue",
   sign_column = "logFC",
   use_pseudo_leaf = FALSE
   )
 
-da_results_scaled_mat_pn56$output$names <- TreeSummarizedExperiment::convertNode(
+da_results_mat_pn56$output$names <- TreeSummarizedExperiment::convertNode(
   phylogenetic_tree_mat,
-  da_results_scaled_mat_pn56$output$node
+  da_results_mat_pn56$output$node
   )
+da_results_mat_pn56$output
 ```
 
-##### Volcano plot
-```{r plot volcano maternal pn56 TSS, echo=FALSE}
-# permutation based False Discovery Proportion estimation
-fdr_thresh_scaled_mat_pn56 <- permFDP::permFDP.adjust.threshold(
-  pVals = da_results_scaled_mat_pn56$output$PValue,
-  threshold = 0.1,
-  myDesign = ifelse(metadata_mat_pn56[colnames(scaled_counts_mat_pn56), "code"] == "A Y", 1, 2),
-  intOnly = scaled_counts_mat_pn56[da_results_scaled_mat_pn56$output$names, ],
-  nPerms = 999
-)
+
+```{r plot volcano maternal pn56, echo=FALSE}
 # plot
-p_scaled_mat_pn56 <- volcano_plot(
-  da_results_scaled_mat_pn56, 
-  alpha = fdr_thresh_scaled_mat_pn56, 
-  color_scheme = COLOR_SCHEME, 
-  title = "Differential functions at pn56 - Mother (TSS transformed)")
-p_scaled_mat_pn56
-
-# adjusted p-values plot
-gene_daa_pn56m <- da_results_scaled_mat_pn56$output
-DT::datatable(gene_daa_pn56m)
-
-gene_volcano_pn56m <- gene_daa_pn56m |>
-  mutate(`adj.p`=-log10(`adj.p`)) |>
-  mutate(label=if_else(abs(`logFC`)>2, names, NA_character_)) |>
-  mutate(label=if_else(`adj.p` >1.3, names, NA_character_)) |>
-  mutate(color=if_else(`logFC`>0, "#FF9E4A", "#729ECE")) |>
-  mutate(color=if_else(is.na(label), "#000000", color)) |>
-  ggplot(mapping = aes(`logFC`, `adj.p`, color=I(color), label=label, shape=I(1))) +
-  geom_point() +
-  geom_hline(linetype = "dotted", yintercept = 1.3) +
-  geom_vline(linetype = "dotted", xintercept = 2) +
-  geom_vline(linetype = "dotted", xintercept = -2) +
-  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
-  labs(title = "treeclimbR, maternal samples at pn56m, gene counts",
-       x = expression(~Log[2]~FoldChange),
-       y = expression(-~Log[10]~Q)) +
-  theme_bw()
-gene_volcano_pn56m
-
+p_mat_pn56 <- volcano_plot(
+  da_results_mat_pn56,
+  alpha = 0.05,
+  color_scheme = COLOR_SCHEME,
+  title = "Differential functions at pn56 - Mother (TMM transformed)")
+p_mat_pn56
 ```
 
 
-##### GSEA
-```{r GSEA maternal pn56 TSS, echo=FALSE}
-tmp <- data.frame(da_results_scaled_mat_pn56$output[, c("logFC", "names")])
+```{r GSEA maternal pn56, echo=FALSE}
+tmp <- data.frame(da_results_mat_pn56$output[, c("logFC", "names")])
 # the DA lists also include CARD, CAZyme, and HMO genes, but we only have mappings for KEGG atm
 kegg_genes_tmp <- tmp$names %in% gene_anno[gene_anno$database == "KEGG", "anno"]
 tmp <- tmp[kegg_genes_tmp, ]
-gene_list_scaled_mat_pn56 <- tmp[,1]
-names(gene_list_scaled_mat_pn56) <- as.character(tmp[, 2])
-gene_list_scaled_mat_pn56 <- sort(gene_list_scaled_mat_pn56, decreasing = TRUE)
+gene_list_mat_pn56 <- tmp[,1]
+names(gene_list_mat_pn56) <- as.character(tmp[, 2])
+gene_list_mat_pn56 <- sort(gene_list_mat_pn56, decreasing = TRUE)
 
-kk_scaled_mat_pn56 <- clusterProfiler::GSEA(
-  gene_list_scaled_mat_pn56, 
-  TERM2GENE = pathway_to_gene,  
+kk_mat_pn56 <- clusterProfiler::GSEA(
+  gene_list_mat_pn56,
+  TERM2GENE = pathway_to_gene,
   TERM2NAME = pathway_to_description,
-  pvalueCutoff = 0.1,
+  pvalueCutoff = 0.05,
   minGSSize = 1
   )
-DT::datatable(kk_scaled_mat_pn56@result)
-vis <- nrow(kk_scaled_mat_pn56@result) > 0 # only run plots if there are results
+# output tables
+DT::datatable(kk_mat_pn56@result)
+enriched_genesets <- base::intersect(
+  names(kk_mat_pn56@geneSets),
+  kk_mat_pn56@result$ID
+  )
+for (set in enriched_genesets){
+  enriched_genes <- as.data.frame(
+    na.omit(kk_mat_pn56@geneList[unlist(kk_mat_pn56@geneSets[set])])
+    )
+  colnames(enriched_genes) <- "logFC"
+}
+```
 
-enrich_pn56m <- enrichplot::dotplot(
-  kk_scaled_mat_pn56, 
-  x = "enrichmentScore", 
-  title = "Differential pathways at pn56m - Mother"
-  ) + xlim(-1, 1)
 
-enrichplot::ridgeplot(kk_scaled_mat_pn56)
-
+```{r GSEA plot maternal pn56, echo=FALSE}
+enrichment_lollipop(kk_mat_pn56)
 ```
 
 
@@ -3754,230 +3722,194 @@ enrichplot::ridgeplot(kk_scaled_mat_pn56)
 
 We first look for differentially abundant genes between treatment groups in the infants.
 
-#### pn12e 
-```{r treeclimbR infants pn12 TSS, include=FALSE}
-res_scaled_inf_pn12 <- treeclimbR::runDA(
-  TSE = tse_object_scaled_inf_pn12,
+#### postnatal 1-2 months
+
+```{r treeclimbR infants pn12, include=FALSE}
+res_inf_pn12 <- treeclimbR::runDA(
+  TSE = tse_object_inf_pn12,
   feature_on_row = TRUE,
   assay = 1,
-  design_terms = "code"
+  design_terms = "code",
+  normalize_method = "TMM"
   )
-res_table_scaled_inf_pn12 <- treeclimbR::nodeResult(
-  object = res_scaled_inf_pn12,
+res_table_inf_pn12 <- treeclimbR::nodeResult(
+  object = res_inf_pn12,
   n = Inf
   )
-candidates_scaled_inf_pn12 <- treeclimbR::getCand(
-  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_inf_pn12),
-  score_data = res_table_scaled_inf_pn12,
+candidates_inf_pn12 <- treeclimbR::getCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_inf_pn12),
+  score_data = res_table_inf_pn12,
   node_column = "node",
   p_column = "PValue",
   sign_column = "logFC"
   )
-da_results_scaled_inf_pn12 <- treeclimbR::evalCand(
-  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_inf_pn12),
+da_results_inf_pn12 <- treeclimbR::evalCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_inf_pn12),
   type = "single",
-  levels = candidates_scaled_inf_pn12$candidate_list,
-  limit_rej = 0.1,
-  score_data = res_table_scaled_inf_pn12,
+  levels = candidates_inf_pn12$candidate_list,
+  limit_rej = 0.05,
+  score_data = res_table_inf_pn12,
   node_column = "node",
   p_column = "PValue",
   sign_column = "logFC",
   use_pseudo_leaf = FALSE
   )
 
-da_results_scaled_inf_pn12$output$names <- TreeSummarizedExperiment::convertNode(
+da_results_inf_pn12$output$names <- TreeSummarizedExperiment::convertNode(
   phylogenetic_tree_inf,
-  da_results_scaled_inf_pn12$output$node
+  da_results_inf_pn12$output$node
   )
+da_results_inf_pn12$output
 ```
 
-##### Volcano plot
-```{r plot volcano infants pn12 TSS, echo=FALSE}
-# permutation based False Discovery Proportion estimation
-fdr_thresh_scaled_inf_pn12 <- permFDP::permFDP.adjust.threshold(
-  pVals = da_results_scaled_inf_pn12$output$PValue,
-  threshold = 0.1,
-  myDesign = ifelse(metadata_inf_pn12[colnames(scaled_counts_inf_pn12), "code"] == "A Y", 1, 2),
-  intOnly = scaled_counts_inf_pn12[da_results_scaled_inf_pn12$output$names, ],
-  nPerms = 999
-)
+
+```{r plot volcano infants pn12, echo=FALSE}
 # plot
-p_scaled_inf_pn12 <- volcano_plot(
-  da_results_scaled_inf_pn12,  
-  alpha = fdr_thresh_scaled_inf_pn12,
-  color_scheme = COLOR_SCHEME, 
-  title = "Differential functions at pn12 - Infant (TSS transformed)")
-p_scaled_inf_pn12
-
-# adjusted p-values plot
-gene_daa_pn12e <- da_results_scaled_inf_pn12$output
-DT::datatable(gene_daa_pn12e)
-
-gene_volcano_pn12e <- gene_daa_pn12e |>
-  mutate(`adj.p`=-log10(`adj.p`)) |>
-  mutate(label=if_else(abs(`logFC`)>2, names, NA_character_)) |>
-  mutate(label=if_else(`adj.p` >1.3, names, NA_character_)) |>
-  mutate(color=if_else(`logFC`>0, "#FF9E4A", "#729ECE")) |>
-  mutate(color=if_else(is.na(label), "#000000", color)) |>
-  ggplot(mapping = aes(`logFC`, `adj.p`, color=I(color), label=label, shape=I(1))) +
-  geom_point() +
-  geom_hline(linetype = "dotted", yintercept = 1.3) +
-  geom_vline(linetype = "dotted", xintercept = 2) +
-  geom_vline(linetype = "dotted", xintercept = -2) +
-  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
-  labs(title = "treeclimbR, infant samples at pn12e, gene counts",
-       x = expression(~Log[2]~FoldChange),
-       y = expression(-~Log[10]~Q)) +
-  theme_bw()
-gene_volcano_pn12e
-
+p_inf_pn12 <- volcano_plot(
+  da_results_inf_pn12,
+  alpha = 0.05,
+  color_scheme = COLOR_SCHEME,
+  title = "Differential functions at pn12 - Infant (TMM transformed)")
+p_inf_pn12
 ```
 
+Using the KEGG gene to pathway mappings, we now also perform a GeneSet Enrichment Analysis (GSEA): a statistical method that aggregates per gene statistics across gene sets (like pathways), making it possible to detect situations where genes within a predefined set change in a small but coordinated way (which thus wouldn't have been detected in a DAA directly on the gene abundances). For each set, an enrichment score is calculated, with a corresponding p-value, which is corrected for multiple testing (Subramanian et al., 2005). This method differs from a hierarchical aggregation in methods like treeclimbR because each gene can also be part of multiple sets, which are tested independently. 
 
-##### GSEA
-```{r GSEA infant pn12 TSS, echo=FALSE}
-tmp <- data.frame(da_results_scaled_inf_pn12$output[, c("logFC", "names")])
+```{r GSEA infant pn12, echo=FALSE}
+tmp <- data.frame(da_results_inf_pn12$output[, c("logFC", "names")])
 # the DA lists also include CARD, CAZyme, and HMO genes, but we only have mappings for KEGG atm
 kegg_genes_tmp <- tmp$names %in% gene_anno[gene_anno$database == "KEGG", "anno"]
 tmp <- tmp[kegg_genes_tmp, ]
-gene_list_scaled_inf_pn12 <- tmp[,1]
-names(gene_list_scaled_inf_pn12) <- as.character(tmp[, 2])
-gene_list_scaled_inf_pn12 <- sort(gene_list_scaled_inf_pn12, decreasing = TRUE)
+gene_list_inf_pn12 <- tmp[,1]
+names(gene_list_inf_pn12) <- as.character(tmp[, 2])
+gene_list_inf_pn12 <- sort(gene_list_inf_pn12, decreasing = TRUE)
 #GSEA
-kk_scaled_inf_pn12 <- clusterProfiler::GSEA(
-  geneList = gene_list_scaled_inf_pn12, 
+kk_inf_pn12 <- clusterProfiler::GSEA(
+  geneList = gene_list_inf_pn12,
   minGSSize = 1,
-  pvalueCutoff = 0.1,
-  TERM2GENE = pathway_to_gene, 
+  pvalueCutoff = 0.05,
+  TERM2GENE = pathway_to_gene,
   TERM2NAME = pathway_to_description
   )
-# output
-DT::datatable(kk_scaled_inf_pn12@result)
-vis <- nrow(kk_scaled_inf_pn12@result) > 0 # only run plots if there are results
-
-enrich_pn12e <- enrichplot::dotplot(
-  kk_scaled_inf_pn12, 
-  x = "enrichmentScore", 
-  title = "Differential pathways at pn12e - Infant"
-  ) + xlim(-1, 1)
-
-enrichplot::ridgeplot(kk_scaled_inf_pn12)
-
+# output tables
+DT::datatable(kk_inf_pn12@result)
+enriched_genesets <- base::intersect(
+  names(kk_inf_pn12@geneSets),
+  kk_inf_pn12@result$ID
+  )
+for (set in enriched_genesets){
+  enriched_genes <- as.data.frame(
+    na.omit(kk_inf_pn12@geneList[unlist(kk_inf_pn12@geneSets[set])])
+    )
+  colnames(enriched_genes) <- "logFC"
+  enriched_genes$gene <- rownames(enriched_genes)
+  cmap <- c(COLOR_SCHEME[c(3, 1)], "white", COLOR_SCHEME[c(2, 4)])
+  lms <- c(-0.3, 0.3)
+  p <- ggplot2::ggplot(enriched_genes, ggplot2::aes(x=1, y=gene, color=logFC)) +
+    ggplot2::geom_jitter(size=5) +
+    ggplot2::scale_color_gradientn(colors=cmap, limits=lms)
+  p
+}
 ```
 
-The porphyrin ring is the framework for the heme molecule, the oigment in hemoglobin and red blood cells.
+
+```{r GSEA plot infant pn12, echo=FALSE}
+enrichment_lollipop(kk_inf_pn12)
+```
 
 
-#### pn56e 
-```{r treeclimbR infants pn56 TSS, include=FALSE}
-res_scaled_inf_pn56 <- treeclimbR::runDA(
-  TSE = tse_object_scaled_inf_pn56,
+#### postnatal 5-6 months
+
+```{r treeclimbR infants pn56, echo=FALSE}
+res_inf_pn56 <- treeclimbR::runDA(
+  TSE = tse_object_inf_pn56,
   feature_on_row = TRUE,
   assay = 1,
-  design_terms = "code"
+  design_terms = "code",
+  normalize_method = "TMM"
   )
-res_table_scaled_inf_pn56 <- treeclimbR::nodeResult(
-  object = res_scaled_inf_pn56,
+res_table_inf_pn56 <- treeclimbR::nodeResult(
+  object = res_inf_pn56,
   n = Inf
   )
-candidates_scaled_inf_pn56 <- treeclimbR::getCand(
-  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_inf_pn56),
-  score_data = res_table_scaled_inf_pn56,
+candidates_inf_pn56 <- treeclimbR::getCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_inf_pn56),
+  score_data = res_table_inf_pn56,
   node_column = "node",
   p_column = "PValue",
   sign_column = "logFC"
   )
-da_results_scaled_inf_pn56 <- treeclimbR::evalCand(
-  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_inf_pn56),
+da_results_inf_pn56 <- treeclimbR::evalCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_inf_pn56),
   type = "single",
-  levels = candidates_scaled_inf_pn56$candidate_list,
-  limit_rej = 0.1,
-  score_data = res_table_scaled_inf_pn56,
+  levels = candidates_inf_pn56$candidate_list,
+  limit_rej = 0.05,
+  score_data = res_table_inf_pn56,
   node_column = "node",
   p_column = "PValue",
   sign_column = "logFC",
   use_pseudo_leaf = FALSE
   )
 
-da_results_scaled_inf_pn56$output$names <- TreeSummarizedExperiment::convertNode(
+da_results_inf_pn56$output$names <- TreeSummarizedExperiment::convertNode(
   phylogenetic_tree_inf,
-  da_results_scaled_inf_pn56$output$node
+  da_results_inf_pn56$output$node
   )
+da_results_inf_pn56$output
 ```
 
-##### Volcano plot
-```{r plot volcano infants pn56 TSS, echo=FALSE}
-# permutation based False Discovery Proportion estimation
-fdr_thresh_scaled_inf_pn56 <- permFDP::permFDP.adjust.threshold(
-  pVals = da_results_scaled_inf_pn56$output$PValue,
-  threshold = 0.1,
-  myDesign = ifelse(metadata_inf_pn56[colnames(scaled_counts_inf_pn56), "code"] == "A Y", 1, 2),
-  intOnly = scaled_counts_inf_pn56[da_results_scaled_inf_pn56$output$names, ],
-  nPerms = 999
-)
+
+```{r plot volcano infants pn56, echo=FALSE}
 # plot
-p_scaled_inf_pn56 <- volcano_plot(
-  da_results_scaled_inf_pn56,  
-  alpha = fdr_thresh_scaled_inf_pn56,
-  color_scheme = COLOR_SCHEME, 
-  title = "Differential functions at pn56 - Infant (TSS transformed)")
-p_scaled_inf_pn56
-
-
-# adjusted p-values plot
-gene_daa_pn56e <- da_results_scaled_inf_pn56$output
-DT::datatable(gene_daa_pn56e)
-
-gene_volcano_pn56e <- gene_daa_pn56e |>
-  mutate(`adj.p`=-log10(`adj.p`)) |>
-  mutate(label=if_else(abs(`logFC`)>2, names, NA_character_)) |>
-  mutate(label=if_else(`adj.p` >1.3, names, NA_character_)) |>
-  mutate(color=if_else(`logFC`>0, "#FF9E4A", "#729ECE")) |>
-  mutate(color=if_else(is.na(label), "#000000", color)) |>
-  ggplot(mapping = aes(`logFC`, `adj.p`, color=I(color), label=label, shape=I(1))) +
-  geom_point() +
-  geom_hline(linetype = "dotted", yintercept = 1.3) +
-  geom_vline(linetype = "dotted", xintercept = 2) +
-  geom_vline(linetype = "dotted", xintercept = -2) +
-  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
-  labs(title = "treeclimbR, infant samples at pn56e, gene counts",
-       x = expression(~Log[2]~FoldChange),
-       y = expression(-~Log[10]~Q)) +
-  theme_bw()
-gene_volcano_pn56e
-
+p_inf_pn56 <- volcano_plot(
+  da_results_inf_pn56,
+  alpha = 0.05,
+  color_scheme = COLOR_SCHEME,
+  title = "Differential functions at pn56 - Infant (TMM transformed)")
+p_inf_pn56
 ```
 
 
-##### GSEA
-```{r GSEA infant pn56 TSS, echo=FALSE}
-tmp <- data.frame(da_results_scaled_inf_pn56$output[, c("logFC", "names")])
+```{r GSEA infant pn56, echo=FALSE}
+tmp <- data.frame(da_results_inf_pn56$output[, c("logFC", "names")])
 # the DA lists also include CARD, CAZyme, and HMO genes, but we only have mappings for KEGG atm
 kegg_genes_tmp <- tmp$names %in% gene_anno[gene_anno$database == "KEGG", "anno"]
 tmp <- tmp[kegg_genes_tmp, ]
-gene_list_scaled_inf_pn56 <- tmp[,1]
-names(gene_list_scaled_inf_pn56) <- as.character(tmp[, 2])
-gene_list_scaled_inf_pn56 <- sort(gene_list_scaled_inf_pn56, decreasing = TRUE)
-#GSEA
-kk_scaled_inf_pn56 <- clusterProfiler::GSEA(
-  geneList = gene_list_scaled_inf_pn56, 
-  minGSSize = 1,
-  pvalueCutoff = 0.1,
-  TERM2GENE = pathway_to_gene, 
-  TERM2NAME = pathway_to_description
+gene_list_inf_pn56 <- tmp[,1]
+names(gene_list_inf_pn56) <- as.character(tmp[, 2])
+gene_list_inf_pn56 <- sort(gene_list_inf_pn56, decreasing = TRUE)
+
+kk_inf_pn56 <- clusterProfiler::GSEA(
+  gene_list_inf_pn56,
+  TERM2GENE = pathway_to_gene,
+  TERM2NAME = pathway_to_description,
+  pvalueCutoff = 0.05,
+  minGSSize = 1
   )
-# output
-DT::datatable(kk_scaled_inf_pn56@result)
-vis <- nrow(kk_scaled_inf_pn56@result) > 0 # only run plots if there are results
+# output tables
+DT::datatable(kk_inf_pn56@result)
+enriched_genesets <- base::intersect(
+  names(kk_inf_pn56@geneSets), 
+  kk_inf_pn56@result$ID
+  )
+for (set in enriched_genesets){
+  enriched_genes <- as.data.frame(
+    na.omit(kk_inf_pn56@geneList[unlist(kk_inf_pn56@geneSets[set])])
+    )
+  colnames(enriched_genes) <- "logFC"
+  enriched_genes$gene <- rownames(enriched_genes)
+  cmap <- c(COLOR_SCHEME[c(3, 1)], "white", COLOR_SCHEME[c(2, 4)])
+  lms <- c(-0.3, 0.3)
+  p <- ggplot2::ggplot(enriched_genes, ggplot2::aes(x=1, y=gene, color=logFC)) +
+    ggplot2::geom_jitter(size=5) +
+    ggplot2::scale_color_gradientn(colors=cmap, limits=lms)
+  p
+}
+```
 
-enrich_pn56e <- enrichplot::dotplot(
-  kk_scaled_inf_pn56, 
-  x = "enrichmentScore", 
-  title = "Differential pathways at pn56e - Infant"
-  ) + xlim(-1, 1)
 
-enrichplot::ridgeplot(kk_scaled_inf_pn56)
-
+```{r GSEA plot infant pn56, echo=FALSE}
+enrichment_lollipop(kk_inf_pn56)
 ```
 
 
