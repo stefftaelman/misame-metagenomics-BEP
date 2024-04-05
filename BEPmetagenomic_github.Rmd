@@ -445,7 +445,13 @@ alpha_div$Row.names <- NULL
 # merge with metadata to split on groups
 alpha_div_extended <- merge(
   x=alpha_div,
-  y=metadata_full[, c("treatment1_prenatal_n", "m_heightincl", "m_hbincl", "w_school_level", "w_marital", "asset1comp_10", "w_language", "w_religion", "w_etnicity", "w_nr_jobs", "csps_n", "w_age", "m_bmiincl", "mddw_10_ave", "ch_sex", "iycf_ebf_age")],
+  y=metadata_full[, c(
+    "treatment1_prenatal_n", "m_heightincl", "m_hbincl",
+    "w_school_level", "w_marital", "asset1comp_10", "w_language",
+    "w_religion", "w_etnicity", "w_nr_jobs", "csps_n", "w_age",
+    "m_bmiincl", "mddw_10_ave", "ch_sex", "iycf_ebf_age",
+    "c_weight0", "c_height0", "lbw", "sga_new", "c_haz6", "c_stunting6"
+    )],
   by=0
   )
 alpha_div_extended$Row.names <- NULL
@@ -495,7 +501,7 @@ set.seed(123)
 TMLE_infant <- tmle::tmle(
   Y=alpha_div_extended_inf$Shannon, 
   A=alpha_div_extended_inf$treatment1_prenatal_n, # must be numeric for the package used
-  W=alpha_div_extended_inf[, c("m_heightincl", "m_hbincl", "w_school_level", "w_marital", "asset1comp_10", "w_language", "w_religion", "w_etnicity", "w_nr_jobs", "csps_n", "w_age", "m_bmiincl", "mddw_10_ave", "ch_sex", "iycf_ebf_age")], 
+  W=alpha_div_extended_inf[,c("m_heightincl", "m_hbincl", "w_school_level", "w_marital", "asset1comp_10", "w_language", "w_religion", "w_etnicity", "w_nr_jobs", "csps_n", "w_age", "m_bmiincl", "mddw_10_ave", "ch_sex", "iycf_ebf_age")], 
   Q.SL.library = sl_library,
   family="gaussian"
   )
@@ -598,7 +604,6 @@ sl_contin <- sl3::Lrnr_sl$new(learners = stack_contin, metalearner = Lrnr_nnls$n
 
 #### Prenatal microbiome mediating birth weight
 
-
 ```{r birth weight, warning = F}
 w <- alpha_div_extended_mat_pre[, covariates_prenatal]
 a <- alpha_div_extended_mat_pre$treatment1_prenatal_n
@@ -632,6 +637,7 @@ tmle_nie_prenatal_weight <- medoutcon(
   )
 tmle_nie_prenatal_weight
 ```
+
 
 #### Prenatal microbiome mediating birth height
 
@@ -703,7 +709,6 @@ tmle_nie_prenatal_ga
 
 #### Prenatal microbiome mediating low birth weight (LBW)
 
-
 ```{r low birth weight, warning = F}
 w <- alpha_div_extended_mat_pre[, covariates_prenatal]
 a <- alpha_div_extended_mat_pre$treatment1_prenatal_n
@@ -735,8 +740,8 @@ tmle_nie_prenatal_lbw <- medoutcon(
 tmle_nie_prenatal_lbw
 ```
 
-#### Prenatal microbiome mediating small for gestational age (SGA)
 
+#### Prenatal microbiome mediating small for gestational age (SGA)
 
 ```{r small for gestational age, warning = F}
 w <- alpha_div_extended_mat_pre[, covariates_prenatal]
@@ -806,8 +811,8 @@ tmle_nie_postnatal_haz <- medoutcon(
 tmle_nie_postnatal_haz
 ```
 
-#### Postnatal microbiome mediating stunting
 
+#### Postnatal microbiome mediating stunting
 
 ```{r stunting combined, warning = F}
 w <- alpha_div_extended_inf[, covariates_postnatal]
@@ -842,6 +847,7 @@ tmle_nie_postnatal_stunting <- medoutcon(
   )
 tmle_nie_postnatal_stunting
 ```
+
 
 #### Combine results
 
@@ -894,6 +900,7 @@ tmle_estimates_df <- cbind(
   ),
   tmle_estimates_df
 )
+tmle_estimates_df
 ```
 
 
