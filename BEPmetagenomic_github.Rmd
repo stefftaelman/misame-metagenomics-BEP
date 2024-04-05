@@ -1,0 +1,3980 @@
+---
+title: "BEPmetagenomic_github"
+author: "Lishi Deng & Steff Taelman"
+date: "2024-04-04"
+output: html_document
+---
+
+# about this markdown
+This markdown combines all statistic steps of metagenomic analysis we did for detecting the BEP effect on gut microbiol composition and functionality.
+Metagenomic sequencing reads mapping and gene-level profiling were performed using inStrain in Python. Therefore these scripts were not included in this markdown, but the demo for use are available at https://github.com/MrOlm/inStrain.
+Therefore, this markdown contains visualization of relative abundance, analysis of alpha diversity, beta diversity, taxonomic differential abundance analysis, mediation analysis and gene set enrichment analysis. The source data are available along with this markdown.
+
+# setup
+## working directory
+First, set the working directory to your folder and set random seed.
+
+```{r echo=FALSE}
+# set the work directory
+knitr::opts_knit$set(
+  echo=TRUE
+  )
+message(paste0("The current working directory is set to: ", getwd()))
+
+set.seed(123)
+```
+
+## packages
+Load necessary packages before analysis.
+
+```{r echo=FALSE, message=FALSE}
+library(ANCOMBC)
+library(clusterProfiler)
+library(ComplexHeatmap)
+library(dbarts)
+library(DESeq2)
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+#library(haven)
+library(hrbrthemes)
+library(lme4)
+library(medoutcon)
+library(mixtools)
+#library(permFDP)
+library(phyloseq)
+#library(plotly)
+library(randomForest)
+library(sl3)
+library(SuperLearner)
+library(tibble)
+library(tidyr)
+library(tmle)
+library(treeclimbR)
+#library(UpSetR)
+```
+
+
+# import data
+## read data
+Save the data files provided first, and read them:
+```{r}
+metadata <- read.csv("./data/metadata.csv", row.names = 1) %>%
+  mutate(bep_group = ifelse(timepoint=="incl" & code=="A Y", "Mother_incl_IFA",
+                     ifelse(timepoint=="incl" & code=="B Z", "Mother_incl_BEP",
+                     ifelse(timepoint=="tri3" & code=="A Y", "Mother_tri3_IFA",
+                     ifelse(timepoint=="tri3" & code=="B Z", "Mother_tri3_BEP",
+                     ifelse(timepoint=="pn12" & child=="no" & code=="A Y", "Mother_pn12_IFA",
+                     ifelse(timepoint=="pn12" & child=="no" & code=="B Z", "Mother_pn12_BEP",
+                     ifelse(timepoint=="pn12" & child=="yes" & code=="A Y", "Infant_pn12_IFA",
+                     ifelse(timepoint=="pn12" & child=="yes" & code=="B Z", "Infant_pn12_BEP",
+                     ifelse(timepoint=="pn56" & child=="no" & code=="A Y", "Mother_pn56_IFA",
+                     ifelse(timepoint=="pn56" & child=="no" & code=="B Z", "Mother_pn56_BEP",
+                     ifelse(timepoint=="pn56" & child=="yes" & code=="A Y", "Infant_pn56_IFA",
+                     ifelse(timepoint=="pn56" & child=="yes" & code=="B Z", "Infant_pn56_BEP","other"))))))))))))) # grouping, dyads and time point information
+
+taxonomy <- as.matrix(read.csv("./data/taxonomy_clean.csv", row.names = 1))
+absolute_counts <- read.csv("./data/absolute_counts_table.csv", row.names = 1)
+
+# read gene tables
+gene_counts <- read.csv("./data/gene_counts_clean.csv", row.names = 1)
+gene_anno <- read.csv("./data/gene_annotations_clean.csv", row.names = 1)
+gene_to_pathway <- read.csv("./data/k2pathway.txt", sep="\t", header=FALSE)
+names(gene_to_pathway) <- c("gene", "pathway")
+gene_to_pathway$gene <- gsub(pattern = "^ko:", "", gene_to_pathway$gene)
+gene_to_pathway$pathway <- gsub(pattern = "^path:", "", gene_to_pathway$pathway)
+pathway_to_gene <- gene_to_pathway[, c("pathway", "gene")]
+
+pathway_to_description <- read.csv("./data/keggmaps_to_name.txt", sep="\t", header=FALSE, colClasses = c("character", "character"))
+pathway_to_description$V1 <- gsub(pattern = "^", "map", pathway_to_description$V1)
+
+microbial_pathways <- read.csv("./data/microbial_ko_table.tsv", sep="\t")
+```
+
+## data preparation
+```{r}
+tax_for_tree <- cbind(taxonomy[, 1:ncol(taxonomy)-1], row.names(taxonomy))
+proxy_phylogenetic_tree <- TreeSummarizedExperiment::toTree(tax_for_tree)
+
+ps <- phyloseq(
+  otu_table=otu_table(absolute_counts, taxa_are_rows=TRUE),
+  tax_table=tax_table(taxonomy),
+  sample_data=sample_data(metadata),
+  phy_tree=phy_tree(proxy_phylogenetic_tree)
+  )
+
+# normalize data
+pslog <- transform_sample_counts(ps, function(x) log(1 + x))
+```
+
+## data subsets
+```{r}
+incl <- subset_samples(ps, timepoint=="incl")
+tri3 <- subset_samples(ps, timepoint=="tri3")
+pn12 <- subset_samples(ps, timepoint=="pn12")
+pn12m <- subset_samples(ps, timepoint=="pn12" & child=="no")
+pn12e <- subset_samples(ps, timepoint=="pn12" & child=="yes")
+pn56 <- subset_samples(ps, timepoint=="pn56")
+pn56m <- subset_samples(ps, timepoint=="pn56" & child=="no")
+pn56e <- subset_samples(ps, timepoint=="pn56" & child=="yes")
+# add label to "code" and "child: "A Y" == "IFA", "B Z" == "BEP"; "no" == "Mother", "yes" == "Child"
+code.labs <- c("A Y" = "IFA", "B Z" = "BEP")
+child.labs <- c("no" = "Mother", "yes" = "Child")
+
+#use log for beta diversity
+infant <- subset_samples(pslog, child=="yes")
+mother <- subset_samples(pslog, child=="no")
+prenatal <- subset_samples(mother, timepoint=="incl" | timepoint=="tri3")
+postnatal <- subset_samples(mother, timepoint=="pn12" | timepoint=="pn56")
+```
+
+
+# Relative abundance
+The sample-to-sample variability can be high, so we plot both aggregated groups and individual samples. These are just visual explorations and not meant for any quantitative testing.
+
+## color setting
+```{r message = FALSE}
+rank_names(ps)
+get_taxa_unique(ps, "phylum")
+phylum_name <- c("Actinobacteriota", "Asgardarchaeota", "Bacteroidota", "Campylobacterota", "Cyanobacteria", "Desulfobacterota", "Elusimicrobiota", "Eremiobacterota", "Fibrobacterota", "Firmicutes", "Firmicutes_A", "Firmicutes_B", "Firmicutes_C", "Firmicutes_G", "Fusobacteriota", "Methanobacteriota", "Myxococcota", "Patescibacteria", "Proteobacteria", "Spirochaetota", "Synergistota", "Thermoplasmatota", "Verrucomicrobiota")
+phylum_color <- c("bisque", "purple","ivory", "royalblue", "gold", "lavender", "seagreen", "coral3", "tan2", "olivedrab", "lightpink", "lightgreen", "salmon", "lightskyblue3", "cyan4", "magenta",  "cyan", "thistle", "skyblue", "yellow2", "burlywood4", "deeppink", "orchid4")
+```
+
+
+## all group at phylum level
+```{r message = FALSE}
+ps_phy <- ps %>%
+  tax_glom(taxrank = "phylum") %>%
+  transform_sample_counts(function(x){x/sum(x)}) %>%
+  psmelt() %>%
+  filter(Abundance >0)
+
+sort.phylum.ps <- ps_phy %>%
+  dplyr::count(phylum, wt = Abundance) %>%
+  arrange(desc(n)) %>%
+  pull(phylum)
+sample.order.ps <- ps_phy %>%
+  filter(phylum == sort.phylum.ps[1]) %>%
+  arrange (desc(Abundance)) %>%
+  pull(Sample)
+ps_phy_plot <- ps_phy %>%
+  mutate(Sample = factor(Sample, levels = sample.order.ps)) %>%
+  mutate(phylum = factor(phylum, levels = rev(sort.phylum.ps))) %>%
+  ggplot(aes(x=bep_group, y=Abundance)) + 
+  geom_bar(aes(fill=phylum), stat = 'identity', position = 'fill') + 
+  theme(axis.text.x = element_text(angle = 90, size = 7), legend.title = element_text(size=8), legend.key.size = unit(0.3, 'cm'), legend.text = element_text(size = 8)) + 
+  labs(x="Sample at different timepoints and treatment group", y="Abundance") + 
+  scale_fill_manual(breaks=phylum_name, values = phylum_color) + 
+  theme(panel.grid = element_blank(), panel.border = element_blank()) +   
+  theme(panel.background = element_blank(),
+        axis.ticks.x=element_blank())+ 
+  guides(fill=guide_legend(ncol = 1))
+ps_phy_plot
+
+```
+
+
+# Alpha diversity
+Alpha diversity metrics are single number summaries of the diversity of microbial communities within a single sample. These are based on the **richness** (number of different taxa or species present) and/or **evenness** (describes how evenly the abundance of each species is distributed) within the sample. We describe
+**Observed**: the simplest richness index
+**Shannon**: measures the evenness
+**Simpson**: takes into account the richness and evenness
+
+## diversity calculation
+```{r calc diversity}
+alpha_div <- phyloseq::estimate_richness(
+  ps,
+  split = TRUE,
+  measures = c("Observed", "Shannon", "Simpson")
+  )
+
+# merge with metadata to split on groups
+alpha_div <- merge(
+  x=alpha_div,
+  y=metadata[, c("idbs", "child", "timepoint", "code")],
+  by=0
+  )
+```
+
+### add group information
+```{r add groups, echo=FALSE}
+COLOR_SCHEME <- c(
+  "#00A98F", "#FFC000", "#1565A9", "#C00000", "#0D0D0D"
+)
+
+COLOR_SCHEME2 <- c(
+  "steelblue", "darkred"
+)
+
+group <- c()
+for (i in 1:nrow(alpha_div)){
+  if (alpha_div[i, "child"] == "yes"){
+    child_str <- "Infant"
+  } else {
+    child_str <- "Mother"
+  }
+  if (alpha_div[i, "code"] == "B Z"){
+    trt_str <- "BEP"
+  } else {
+    trt_str <- "IFA"
+  }
+  # add group
+  group_str <- paste(child_str, trt_str, alpha_div[i, "timepoint"], sep = " ")
+  timegroup <- ifelse(
+    alpha_div[i, "timepoint"] %in% c("incl", "tri3"),
+    "prenatal",
+    "postnatal"
+    )
+  group_2_str <- ifelse(
+    child_str == "Mother",
+    paste(child_str, trt_str, timegroup, sep = " "),
+    paste(child_str, trt_str, sep = " ")
+    )
+  alpha_div[i, "Group"] <- group_str
+  alpha_div[i, "Group_2"] <- group_2_str
+  # add tooltips for interactive plots
+  text_str <- paste0(
+    "mother ID: ", alpha_div[i, "idbs"], "\n",
+    "timepoint of sample: ", alpha_div[i, "timepoint"], "\n",
+    "treatment group: ", trt_str, "\n"
+    )
+  if (alpha_div[i, "child"] == "yes"){
+    text_str <- paste0("infant of ", text_str)
+  }
+  alpha_div[i, "Text"] <- text_str
+}
+
+# set as factor to preserve order
+alpha_div$timepoint <- factor(
+  alpha_div$timepoint,
+  levels=c(
+    "incl",
+    "tri3",
+    "pn12",
+    "pn56"
+    )
+  )
+alpha_div$Group <- factor(
+  alpha_div$Group,
+  levels=c(
+    "Infant BEP pn56",
+    "Infant BEP pn12",
+    "Infant IFA pn56",
+    "Infant IFA pn12",
+    "Mother BEP pn56",
+    "Mother BEP pn12",
+    "Mother BEP tri3",
+    "Mother BEP incl",
+    "Mother IFA pn56",
+    "Mother IFA pn12",
+    "Mother IFA tri3",
+    "Mother IFA incl"
+    )
+  )
+alpha_div$Group_2 <- factor(
+  alpha_div$Group_2,
+  levels=c(
+    "Infant BEP",
+    "Infant IFA",
+    "Mother BEP postnatal",
+    "Mother IFA postnatal",
+    "Mother BEP prenatal",
+    "Mother IFA prenatal"
+    )
+  )
+```
+
+### visualize observed richness
+```{r visualize observed richness, echo=FALSE}
+# set up tooltip for interactive figure
+alpha_div <- alpha_div %>%
+  dplyr::mutate(
+    obs_tooltip = paste0(
+      Text,
+      "Observed species index: ", Observed, "\n"
+      )
+    )
+
+p1 <- ggplot2::ggplot(
+  data = alpha_div,
+  ggplot2::aes(x=Group_2, y=Observed, color=code, shape=timepoint, text=obs_tooltip)
+  ) +
+  ggplot2::geom_jitter(size = 1, alpha = 0.5) +
+  ggplot2::theme_bw() +
+  ggplot2::coord_flip() +
+  ggplot2::scale_color_manual(values = COLOR_SCHEME2) +
+  ggplot2::labs(
+    title = "Alpha diversity per group",
+    x = "",
+    y = "Observed species richness index"
+  ) +
+  ggplot2::geom_boxplot(
+    data = alpha_div,
+    ggplot2::aes(x = Group_2, y = Observed, color = code),
+    alpha = 0.1
+    ) +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    axis.text.x = ggplot2::element_text(vjust = 0.4, hjust = 1),
+    axis.text.y = ggplot2::element_text(vjust = 0.4, hjust = 1),
+    legend.title = ggplot2::element_blank(),
+    legend.position = "right",
+    text = ggplot2::element_text(size = 15)
+    )
+p1
+```
+
+### visualize shannon
+```{r create shannon diversity plot, echo = FALSE}
+# set up tooltip for interactive figure
+alpha_div <- alpha_div %>%
+  dplyr::mutate(
+    sha_tooltip = paste0(
+      Text,
+      "Shannon diversity index: ", round(Shannon, digits=4), "\n"
+      )
+    )
+
+p2 <- ggplot2::ggplot(data = alpha_div) +
+  ggplot2::geom_jitter(
+    size = 1, 
+    alpha = 0.5,
+    ggplot2::aes(x=Group_2, y=Shannon, color=code, shape=timepoint, text=sha_tooltip)
+    ) +
+  ggplot2::theme_bw() +
+  ggplot2::scale_color_manual(
+    name="code",
+    labels= c("IFA", "BEP"),
+    values = COLOR_SCHEME2
+    ) +
+  ggplot2::scale_shape_manual(
+    name = "timepoint",
+    labels = c("incl", "tri3", "pn12", "pn56"),
+    values=c(5, 16, 17, 3)
+    ) +
+  ggplot2::geom_boxplot(
+    data = alpha_div,
+    ggplot2::aes(x = Group_2, y = Shannon, color = code),
+    alpha = 0.1
+    ) +
+  ggplot2::labs(
+    title = "Alpha diversity per group",
+    x = "",
+    y = "Shannon diversity index"
+   ) +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    axis.text.x = ggplot2::element_text(vjust = 0.4, hjust = 1),
+    axis.text.y = ggplot2::element_text(vjust = 0.4, hjust = 1),
+    legend.title = ggplot2::element_blank(),
+    legend.position = "right",
+    text = ggplot2::element_text(size = 15)
+    )
+p2
+```
+
+### visualize simpson
+```{r visualize simpson diversity, echo = FALSE}
+# set up tooltip for interactive figure
+alpha_div <- alpha_div %>%
+  dplyr::mutate(
+    sim_tooltip = paste0(
+      Text,
+      "Simpson diversity index: ", Simpson, "\n"
+      )
+    )
+
+p3 <- ggplot2::ggplot(
+  data = alpha_div,
+  ggplot2::aes(x=Group_2, y=Simpson, color=code, shape=timepoint, text=sim_tooltip)
+  ) +
+  ggplot2::geom_jitter(size = 1, alpha = 0.5) +
+  ggplot2::theme_bw() +
+  ggplot2::coord_flip() +
+  ggplot2::scale_color_manual(values = COLOR_SCHEME2) +
+  ggplot2::labs(
+    title = "Alpha diversity per group",
+    x = "",
+    y = "Simpson diversity index"
+  ) +
+  ggplot2::geom_boxplot(
+    data = alpha_div,
+    ggplot2::aes(x = Group_2, y = Simpson, color = code),
+    alpha = 0.1
+    ) +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    axis.text.x = ggplot2::element_text(vjust = 0.4, hjust = 1),
+    axis.text.y = ggplot2::element_text(vjust = 0.4, hjust = 1),
+    legend.title = ggplot2::element_blank(),
+    legend.position = "right",
+    text = ggplot2::element_text(size = 15)
+    )
+p3
+```
+
+
+## TMLE
+Targeted Maximum Likelihood Estimation (TMLE) is a general approach for constructing an effectient double-robust semi-parametric substitution estimator of a causal effect parameter or statistical association measure.
+
+TMLE estimate of effect of BEP supplementation on the microbial diversity in the mother prenatally (across incl and tri3) and postnally (across pn12 and pn56) and in infant (across pn12 and pn56).
+It tries to estimate the average outcome (Shannon diversity of the gut microbiome). 
+**Additive Effect among the Treated**: predicts that for if every women that actually received the treatment.
+**Additive Effect among the Contrils**: predicts for if the women in the control group had received the additive.
+**Additive Effect**: summarizes the expected increase in Shannon diversity between the two treatments.
+
+The metadata used here will be made available through a data-sharing agreement. Please contact carl.lachat@ugent.be for any queries. 
+```{r}
+# load full (sensitive) metadata
+metadata_full <- read.csv("./data/metadata_full.csv", row.names = 1) %>%
+  mutate(bep_group = ifelse(timepoint=="incl" & code=="A Y", "Mother_incl_IFA",
+                     ifelse(timepoint=="incl" & code=="B Z", "Mother_incl_BEP",
+                     ifelse(timepoint=="tri3" & code=="A Y", "Mother_tri3_IFA",
+                     ifelse(timepoint=="tri3" & code=="B Z", "Mother_tri3_BEP",
+                     ifelse(timepoint=="pn12" & child=="no" & code=="A Y", "Mother_pn12_IFA",
+                     ifelse(timepoint=="pn12" & child=="no" & code=="B Z", "Mother_pn12_BEP",
+                     ifelse(timepoint=="pn12" & child=="yes" & code=="A Y", "Infant_pn12_IFA",
+                     ifelse(timepoint=="pn12" & child=="yes" & code=="B Z", "Infant_pn12_BEP",
+                     ifelse(timepoint=="pn56" & child=="no" & code=="A Y", "Mother_pn56_IFA",
+                     ifelse(timepoint=="pn56" & child=="no" & code=="B Z", "Mother_pn56_BEP",
+                     ifelse(timepoint=="pn56" & child=="yes" & code=="A Y", "Infant_pn56_IFA",
+                     ifelse(timepoint=="pn56" & child=="yes" & code=="B Z", "Infant_pn56_BEP","other"))))))))))))) # grouping, dyads and time point information
+
+row.names(alpha_div) <- alpha_div$Row.names
+alpha_div$Row.names <- NULL
+# merge with metadata to split on groups
+alpha_div_extended <- merge(
+  x=alpha_div,
+  y=metadata_full[, c("treatment1_prenatal_n", "m_heightincl", "m_hbincl", "w_school_level", "w_marital", "asset1comp_10", "w_language", "w_religion", "w_etnicity", "w_nr_jobs", "csps_n", "w_age", "m_bmiincl", "mddw_10_ave", "ch_sex", "iycf_ebf_age")],
+  by=0
+  )
+alpha_div_extended$Row.names <- NULL
+alpha_div_extended <- alpha_div_extended[complete.cases(alpha_div_extended), ]
+alpha_div_extended$timepoint <- as.factor(alpha_div_extended$timepoint)
+alpha_div_extended$code <- ifelse(alpha_div_extended$code == "B Z", 1, 0)
+
+alpha_div_extended_mat <- alpha_div_extended[alpha_div_extended$child =="no", ]
+alpha_div_extended_mat_pre <- alpha_div_extended_mat[alpha_div_extended_mat$timepoint %in% c("incl", "tri3"), ]
+alpha_div_extended_mat_post <- alpha_div_extended_mat[alpha_div_extended_mat$timepoint %in% c("pn12", "pn56"), ]
+alpha_div_extended_inf <- alpha_div_extended[alpha_div_extended$child =="yes", ]
+```
+
+### TMLE maternal prenatal
+```{r}
+set.seed(123)
+sl_library <- c("SL.glm","SL.step","SL.glm.interaction","SL.randomForest")
+
+TMLE_maternal_pre <- tmle(
+  Y=alpha_div_extended_mat_pre$Shannon,
+  A=alpha_div_extended_mat_pre$treatment1_prenatal_n, # must be numeric for the package used
+  W=alpha_div_extended_mat_pre[, c("m_heightincl", "m_hbincl", "w_school_level", "w_marital", "asset1comp_10", "w_language", "w_religion", "w_etnicity", "w_nr_jobs", "csps_n", "w_age", "m_bmiincl", "mddw_10_ave")], 
+  Q.SL.library = sl_library,
+  family="gaussian"
+  )
+summary(TMLE_maternal_pre)
+```
+
+
+### TMLE maternal postnatal
+```{r}
+set.seed(123)
+TMLE_maternal_post <- tmle::tmle(
+  Y=alpha_div_extended_mat_post$Shannon,
+  A=alpha_div_extended_mat_post$treatment1_prenatal_n, # must be numeric for the package used
+  W=alpha_div_extended_mat_post[, c("m_heightincl", "m_hbincl", "w_school_level", "w_marital", "asset1comp_10", "w_language", "w_religion", "w_etnicity", "w_nr_jobs", "csps_n", "w_age", "m_bmiincl", "mddw_10_ave")], 
+  Q.SL.library = sl_library,
+  family="gaussian"
+  )
+summary(TMLE_maternal_post)
+```
+
+
+### TMLE infant
+```{r}
+set.seed(123)
+TMLE_infant <- tmle::tmle(
+  Y=alpha_div_extended_inf$Shannon, 
+  A=alpha_div_extended_inf$treatment1_prenatal_n, # must be numeric for the package used
+  W=alpha_div_extended_inf[, c("m_heightincl", "m_hbincl", "w_school_level", "w_marital", "asset1comp_10", "w_language", "w_religion", "w_etnicity", "w_nr_jobs", "csps_n", "w_age", "m_bmiincl", "mddw_10_ave", "ch_sex", "iycf_ebf_age")], 
+  Q.SL.library = sl_library,
+  family="gaussian"
+  )
+summary(TMLE_infant)
+```
+
+
+## mediation analysis against diversity
+The metadata used here will be made available through a data-sharing agreement. Please contact carl.lachat@ugent.be for any queries. 
+
+```{r numeric vars}
+# continuous variables
+covariates_prenatal <- c(
+  "m_heightincl", "m_hbincl", "asset1comp_10", "w_nr_jobs",
+  "w_age", "m_bmiincl", "mddw_10_ave"
+)
+covariates_postnatal <- c(covariates_prenatal, "iycf_ebf_age")
+
+# make categorical variables into binary dummy vars
+alpha_div_extended_mat_pre[, c(
+  "w_marital", "w_language", "w_religion", "w_etnicity", "csps_n"
+  )] <- lapply(
+    alpha_div_extended_mat_pre[, c(
+      "w_marital", "w_language", "w_religion", "w_etnicity", "csps_n"
+      )],
+      factor
+    )
+alpha_div_extended_mat_pre$ch_sex <- dplyr::if_else(
+  alpha_div_extended_mat_pre$ch_sex == 1, 0, 1
+)
+dummified_prenatal <- fastDummies::dummy_columns(
+  .data = alpha_div_extended_mat_pre[, c("w_school_level", "w_marital", "w_language", "w_religion", "w_etnicity", "csps_n")],
+  remove_selected_columns = TRUE
+)
+alpha_div_extended_mat_pre <- cbind(
+  alpha_div_extended_mat_pre[, !(
+    names(alpha_div_extended_mat_pre) %in% c("w_school_level", "w_marital", "w_language", "w_religion", "w_etnicity", "csps_n")
+  )],
+  dummified_prenatal
+)
+covariates_prenatal <- c(covariates_prenatal, names(dummified_prenatal))
+
+alpha_div_extended_inf[, c(
+  "w_marital", "w_language", "w_religion", "w_etnicity", "csps_n"
+  )] <- lapply(
+    alpha_div_extended_inf[, c(
+      "w_marital", "w_language", "w_religion", "w_etnicity", "csps_n"
+      )],
+      factor
+    )
+alpha_div_extended_inf$ch_sex <- dplyr::if_else(alpha_div_extended_inf$ch_sex == 1, 0, 1)
+dummified_postnatal <- fastDummies::dummy_columns(
+  .data = alpha_div_extended_inf[, c("w_school_level", "w_marital", "w_language", "w_religion", "w_etnicity", "csps_n")],
+  remove_selected_columns = TRUE
+)
+alpha_div_extended_inf <- cbind(
+  alpha_div_extended_inf[, !(
+    names(alpha_div_extended_inf) %in% c("w_school_level", "w_marital", "w_language", "w_religion", "w_etnicity", "csps_n")
+  )],
+  dummified_postnatal
+)
+covariates_postnatal <- c(covariates_postnatal, names(dummified_postnatal))
+
+# set exposure and outcome types
+alpha_div_extended_mat_pre$treatment1_prenatal_n <- as.numeric(alpha_div_extended_mat_pre$treatment1_prenatal_n)
+alpha_div_extended_inf$treatment1_prenatal_n <- as.numeric(alpha_div_extended_inf$treatment1_prenatal_n)
+alpha_div_extended_mat_pre$Shannon <- as.numeric(alpha_div_extended_mat_pre$Shannon)
+alpha_div_extended_inf$Shannon <- as.numeric(alpha_div_extended_inf$Shannon)
+alpha_div_extended_mat_pre$c_weight0 <- as.numeric(alpha_div_extended_mat_pre$c_weight0)
+alpha_div_extended_inf$c_weight0 <- as.numeric(alpha_div_extended_inf$c_weight0)
+alpha_div_extended_mat_pre$c_height0 <- as.numeric(alpha_div_extended_mat_pre$c_height0)
+alpha_div_extended_inf$c_height0 <- as.numeric(alpha_div_extended_inf$c_height0)
+alpha_div_extended_mat_pre$lbw <- as.numeric(alpha_div_extended_mat_pre$lbw)
+alpha_div_extended_inf$lbw <- as.numeric(alpha_div_extended_inf$lbw)
+alpha_div_extended_mat_pre$sga_new <- as.numeric(alpha_div_extended_mat_pre$sga_new)
+alpha_div_extended_inf$sga_new <- as.numeric(alpha_div_extended_inf$sga_new)
+alpha_div_extended_mat_pre$c_haz6 <- as.numeric(alpha_div_extended_mat_pre$c_haz6)
+alpha_div_extended_inf$c_haz6 <- as.numeric(alpha_div_extended_inf$c_haz6)
+alpha_div_extended_mat_pre$c_stunting6 <- as.numeric(alpha_div_extended_mat_pre$c_stunting6)
+alpha_div_extended_inf$c_stunting6 <- as.numeric(alpha_div_extended_inf$c_stunting6)
+```
+
+```{r learners}
+## for binary output variable
+lrn_glm_bin <- sl3::Lrnr_glm$new(family = "binomial")
+lrn_ridge_bin <- sl3::Lrnr_glmnet$new(alpha = 0, family = "binomial")
+lrn_lasso_bin <- sl3::Lrnr_glmnet$new(alpha = 1, family = "binomial")
+lrn_ranger <- sl3::Lrnr_ranger$new()
+stack_bin <- sl3::Stack$new(lrn_glm_bin, lrn_ridge_bin, lrn_lasso_bin, lrn_ranger)
+sl_bin <- sl3::Lrnr_sl$new(learners = stack_bin, metalearner = Lrnr_nnls$new())
+## for continuous output variable
+lrn_ridge_contin <- sl3::Lrnr_glmnet$new(alpha=0, family="gaussian")
+lrn_lasso_contin <- sl3::Lrnr_glmnet$new(alpha=1, family="gaussian")
+lrn_fglm_contin <- sl3::Lrnr_glm_fast$new(family=gaussian())
+lrn_ranger <- sl3::Lrnr_ranger$new()
+stack_contin <- sl3::Stack$new(lrn_ridge_contin, lrn_lasso_contin, lrn_fglm_contin, lrn_ranger)
+sl_contin <- sl3::Lrnr_sl$new(learners = stack_contin, metalearner = Lrnr_nnls$new())
+```
+
+
+#### Prenatal microbiome mediating birth weight
+
+
+```{r birth weight, warning = F}
+w <- alpha_div_extended_mat_pre[, covariates_prenatal]
+a <- alpha_div_extended_mat_pre$treatment1_prenatal_n
+y <- alpha_div_extended_mat_pre$c_weight0
+m <- alpha_div_extended_mat_pre$Shannon
+
+# check missing data
+print(sum(is.na(alpha_div_extended_mat_pre)))
+
+tmle_nde_prenatal_weight <- medoutcon(
+  W = w, A = a, Z = NULL, M = m, Y = y,
+  effect = "direct",
+  estimator = "tmle",
+  g_learners = sl_bin,
+  h_learners = sl_contin,
+  b_learners = sl_contin,
+  r_learners = sl_contin,
+  estimator_args = list(cv_folds = 5L, max_iter = 5L, tiltmod_tol = 5)
+  )
+tmle_nde_prenatal_weight
+
+tmle_nie_prenatal_weight <- medoutcon(
+  W = w, A = a, Z = NULL, M = m, Y = y,
+  effect = "indirect",
+  estimator = "tmle",
+  g_learners = sl_bin,
+  h_learners = sl_contin,
+  b_learners = sl_contin,
+  r_learners = sl_contin,
+  estimator_args = list(cv_folds = 5L, max_iter = 5L, tiltmod_tol = 5)
+  )
+tmle_nie_prenatal_weight
+```
+
+#### Prenatal microbiome mediating birth height
+
+```{r birth length, warning = F}
+w <- alpha_div_extended_mat_pre[, covariates_prenatal]
+a <- alpha_div_extended_mat_pre$treatment1_prenatal_n
+y <- alpha_div_extended_mat_pre$c_height0
+m <- alpha_div_extended_mat_pre$Shannon
+
+tmle_nde_prenatal_height <- medoutcon(
+  W = w, A = a, Z = NULL, M = m, Y = y,
+  effect = "direct",
+  estimator = "tmle",
+  g_learners = sl_bin,
+  h_learners = sl_contin,
+  b_learners = sl_contin,
+  r_learners = sl_contin,
+  estimator_args = list(cv_folds = 5L, max_iter = 5L, tiltmod_tol = 5)
+  )
+tmle_nde_prenatal_height
+
+tmle_nie_prenatal_height <- medoutcon(
+  W = w, A = a, Z = NULL, M = m, Y = y,
+  effect = "indirect",
+  estimator = "tmle",
+  g_learners = sl_bin,
+  h_learners = sl_contin,
+  b_learners = sl_contin,
+  r_learners = sl_contin,
+  estimator_args = list(cv_folds = 5L, max_iter = 5L, tiltmod_tol = 5)
+  )
+tmle_nie_prenatal_height
+```
+
+
+#### Prenatal microbiome mediating gestational age at birth
+
+```{r gestational age, warning = F}
+w <- alpha_div_extended_mat_pre[, covariates_prenatal]
+a <- alpha_div_extended_mat_pre$treatment1_prenatal_n
+y <- alpha_div_extended_mat_pre$GAbirthweeks
+m <- alpha_div_extended_mat_pre$Shannon
+
+tmle_nde_prenatal_ga <- medoutcon(
+  W = w, A = a, Z = NULL, M = m, Y = y,
+  effect = "direct",
+  estimator = "tmle",
+  g_learners = sl_bin,
+  h_learners = sl_contin,
+  b_learners = sl_contin,
+  r_learners = sl_contin,
+  estimator_args = list(cv_folds = 5L, max_iter = 5L, tiltmod_tol = 5)
+  )
+tmle_nde_prenatal_ga
+
+tmle_nie_prenatal_ga <- medoutcon(
+  W = w, A = a, Z = NULL, M = m, Y = y,
+  effect = "indirect",
+  estimator = "tmle",
+  g_learners = sl_bin,
+  h_learners = sl_contin,
+  b_learners = sl_contin,
+  r_learners = sl_contin,
+  estimator_args = list(cv_folds = 5L, max_iter = 5L, tiltmod_tol = 5)
+  )
+tmle_nie_prenatal_ga
+```
+
+
+#### Prenatal microbiome mediating low birth weight (LBW)
+
+
+```{r low birth weight, warning = F}
+w <- alpha_div_extended_mat_pre[, covariates_prenatal]
+a <- alpha_div_extended_mat_pre$treatment1_prenatal_n
+y <- alpha_div_extended_mat_pre$lbw
+m <- alpha_div_extended_mat_pre$Shannon
+
+tmle_nde_prenatal_lbw <- medoutcon(
+  W = w, A = a, Z = NULL, M = m, Y = y,
+  effect = "direct",
+  estimator = "tmle",
+  g_learners = sl_bin,
+  h_learners = sl_contin,
+  b_learners = sl_bin,
+  r_learners = sl_contin,
+  estimator_args = list(cv_folds = 5L, max_iter = 5L, tiltmod_tol = 5)
+  )
+tmle_nde_prenatal_lbw
+
+tmle_nie_prenatal_lbw <- medoutcon(
+  W = w, A = a, Z = NULL, M = m, Y = y,
+  effect = "indirect",
+  estimator = "tmle",
+  g_learners = sl_bin,
+  h_learners = sl_contin,
+  b_learners = sl_bin,
+  r_learners = sl_contin,
+  estimator_args = list(cv_folds = 5L, max_iter = 5L, tiltmod_tol = 5)
+  )
+tmle_nie_prenatal_lbw
+```
+
+#### Prenatal microbiome mediating small for gestational age (SGA)
+
+
+```{r small for gestational age, warning = F}
+w <- alpha_div_extended_mat_pre[, covariates_prenatal]
+a <- alpha_div_extended_mat_pre$treatment1_prenatal_n
+y <- alpha_div_extended_mat_pre$sga_new
+m <- alpha_div_extended_mat_pre$Shannon
+
+tmle_nde_prenatal_sga <- medoutcon(
+  W = w, A = a, Z = NULL, M = m, Y = y,
+  effect = "direct",
+  estimator = "tmle",
+  g_learners = sl_bin,
+  h_learners = sl_contin,
+  b_learners = sl_bin,
+  r_learners = sl_contin,
+  estimator_args = list(cv_folds = 5L, max_iter = 5L, tiltmod_tol = 5)
+  )
+tmle_nde_prenatal_sga
+
+tmle_nie_prenatal_sga <- medoutcon(
+  W = w, A = a, Z = NULL, M = m, Y = y,
+  effect = "indirect",
+  estimator = "tmle",
+  g_learners = sl_bin,
+  h_learners = sl_contin,
+  b_learners = sl_bin,
+  r_learners = sl_contin,
+  estimator_args = list(cv_folds = 5L, max_iter = 5L, tiltmod_tol = 5)
+  )
+tmle_nie_prenatal_sga
+```
+
+
+#### Postnatal microbiome mediating height for age
+
+```{r length for age combined, warning = F}
+w <- alpha_div_extended_inf[, covariates_postnatal]
+a <- alpha_div_extended_inf$treatment1_prenatal_n
+y <- alpha_div_extended_inf$c_haz6
+m <- alpha_div_extended_inf$Shannon
+
+# check missing data
+print(sum(is.na(alpha_div_extended_inf)))
+
+tmle_nde_postnatal_haz <- medoutcon(
+  W = w, A = a, Z = NULL, M = m, Y = y,
+  effect = "direct",
+  estimator = "tmle",
+  g_learners = sl_bin,
+  h_learners = sl_contin,
+  b_learners = sl_contin,
+  r_learners = sl_contin,
+  estimator_args = list(cv_folds = 5L, max_iter = 5L, tiltmod_tol = 5)
+  )
+tmle_nde_postnatal_haz
+
+tmle_nie_postnatal_haz <- medoutcon(
+  W = w, A = a, Z = NULL, M = m, Y = y,
+  effect = "indirect",
+  estimator = "tmle",
+  g_learners = sl_bin,
+  h_learners = sl_contin,
+  b_learners = sl_contin,
+  r_learners = sl_contin,
+  estimator_args = list(cv_folds = 5L, max_iter = 5L, tiltmod_tol = 5)
+  )
+tmle_nie_postnatal_haz
+```
+
+#### Postnatal microbiome mediating stunting
+
+
+```{r stunting combined, warning = F}
+w <- alpha_div_extended_inf[, covariates_postnatal]
+a <- alpha_div_extended_inf$treatment1_prenatal_n
+y <- alpha_div_extended_inf$c_stunting6
+m <- alpha_div_extended_inf$Shannon
+
+# check missing data
+print(sum(is.na(alpha_div_extended_inf)))
+
+tmle_nde_postnatal_stunting <- medoutcon(
+  W = w, A = a, Z = NULL, M = m, Y = y,
+  effect = "direct",
+  estimator = "tmle",
+  g_learners = sl_bin,
+  h_learners = sl_contin,
+  b_learners = sl_contin,
+  r_learners = sl_contin,
+  estimator_args = list(cv_folds = 5L, max_iter = 5L, tiltmod_tol = 5)
+  )
+tmle_nde_postnatal_stunting
+
+tmle_nie_postnatal_stunting <- medoutcon(
+  W = w, A = a, Z = NULL, M = m, Y = y,
+  effect = "indirect",
+  estimator = "tmle",
+  g_learners = sl_bin,
+  h_learners = sl_contin,
+  b_learners = sl_contin,
+  r_learners = sl_contin,
+  estimator_args = list(cv_folds = 5L, max_iter = 5L, tiltmod_tol = 5)
+  )
+tmle_nie_postnatal_stunting
+```
+
+#### Combine results
+
+```{r}
+tmle_estimates <- list(
+  tmle_nde_prenatal_height,
+  tmle_nie_prenatal_height,
+  tmle_nde_prenatal_weight,
+  tmle_nie_prenatal_weight,
+  tmle_nde_prenatal_ga,
+  tmle_nie_prenatal_ga,
+  tmle_nde_prenatal_lbw,
+  tmle_nie_prenatal_lbw,
+  tmle_nde_prenatal_sga,
+  tmle_nie_prenatal_sga,
+  tmle_nde_postnatal_haz,
+  tmle_nie_postnatal_haz,
+  tmle_nde_postnatal_stunting,
+  tmle_nie_postnatal_stunting
+)
+effects <- c(
+  "height (NDE)", "height (NIE)",
+  "weight (NDE)", "weight (NIE)",
+  "gestational age (NDE)", "gestational age (NIE)",
+  "lbw (NDE)", "lbw (NIE)",
+  "sga (NDE)", "sga (NIE)",
+  "haz (NDE)", "haz (NIE)",
+  "stunting (NDE)", "stunting (NIE)"
+)
+tmle_estimates_df <- data.frame(effect=c(), estimate=c(), std.error=c(), conf.low=c(), conf.high=c())
+
+for (effect_idx in 1:length(tmle_estimates)){
+  row <- data.frame(
+    "outcome" = effects[effect_idx],
+    "estimate" = as.numeric(tmle_estimates[[effect_idx]]$theta),
+    "std.error" = sqrt(as.numeric(tmle_estimates[[effect_idx]]$var)),
+    "conf.low" = as.numeric(
+      tmle_estimates[[effect_idx]]$theta
+    ) - 1.96 * sqrt(as.numeric(tmle_estimates[[effect_idx]]$var)),
+    "conf.high" = as.numeric(
+      tmle_estimates[[effect_idx]]$theta
+    ) + 1.96 * sqrt(as.numeric(tmle_estimates[[effect_idx]]$var))
+  )
+  tmle_estimates_df <- rbind(tmle_estimates_df, row)
+}
+tmle_estimates_df <- cbind(
+  "treatment" = rep("BEP", nrow(tmle_estimates_df)),
+  "mediator" = c(rep("maternal microbiome diversity", 10), rep("infant microbiome diversity", 4)),
+  "timepoint" = c(rep("incl-tri3", 10), rep("pn12-pn56", 4),
+  ),
+  tmle_estimates_df
+)
+```
+
+
+# Beta diversity (weighted UniFrac)
+Beta diversity quantifies variation between communities (samples). Beta-diversity is typically calculated on the species composition tables directly (after normalization), but can be calculated using abundances at higher taxonomic levels. We calculate the species distance in this case. 
+- Unifrac distance: take into account the phylogenetic tree information
+Beta diversities are usually presented as dist object, which contain triangular data describing the distance between each pair of samples. These distance can be further subjected to ordination. Ordination is to reduce the dimensionality of the data for further evaluation or visualsation. Ordination techniques aim to capture as much of essential information in the data as possible in a lower dimensional representation. Dimension reduction is bound to loose information but ordination techniques aim to preserve relevant information of sample similarities in an optimal way.
+
+## infant 4 groups
+```{r message=FALSE}
+infant_ord <- phyloseq::ordinate(infant, "PCoA", "unifrac", weighted=T)
+phyloseq::plot_scree(infant_ord) + geom_bar(stat = "identity", fill="blue") + labs(x="\nAxis", y="Proportion of Variance\n")
+head(infant_ord$values$Eigenvalues)
+
+infant_eig1 <- infant_ord$values$Eigenvalues[1]/sum(infant_ord$values$Eigenvalues)
+infant_eig2 <- infant_ord$values$Eigenvalues[2]/sum(infant_ord$values$Eigenvalues)
+beta_infant <- phyloseq::plot_ordination(infant, infant_ord, color = "bep_group") + scale_color_manual(
+    name="code",
+    values = COLOR_SCHEME[1:4]
+    ) +
+  ggplot2::labs(
+    title = "Beta diversity, weighted unifrac, infant samples",
+  ) +
+  geom_point(size=1) +
+  coord_fixed(infant_eig1/infant_eig2) +
+  stat_ellipse(aes(group=bep_group), linetype=2) +
+  theme_bw()+
+  theme(aspect.ratio = 1)
+ggsave("beta_infant.png", width = 5, height = 5, units = "in", bg = "white")
+beta_infant
+
+infant_dist <- UniFrac(infant, weighted = T, normalized = TRUE, parallel = FALSE, fast=TRUE)
+vegan::adonis2(infant_dist ~ phyloseq::sample_data(infant)$code + phyloseq::sample_data(infant)$timepoint )
+```
+
+
+### infant pn12
+```{r message = FALSE}
+pn12e_ord <- phyloseq::ordinate(pn12e, "PCoA", "unifrac", weighted=T)
+phyloseq::plot_scree(pn12e_ord) + geom_bar(stat = "identity", fill="blue") + labs(x="\nAxis", y="Proportion of Variance\n")
+head(pn12e_ord$values$Eigenvalues)
+
+pn12e_eig1 <- pn12e_ord$values$Eigenvalues[1]/sum(pn12e_ord$values$Eigenvalues)
+pn12e_eig2 <- pn12e_ord$values$Eigenvalues[2]/sum(pn12e_ord$values$Eigenvalues)
+phyloseq::plot_ordination(pn12e, pn12e_ord, color = "code") + 
+  geom_point(size=1) +
+  coord_fixed(pn12e_eig1/pn12e_eig2) +
+  stat_ellipse(aes(group=code), linetype=2) +
+  theme_bw()
+
+pn12e_dist <- UniFrac(pn12e, weighted = T, normalized = TRUE, parallel = FALSE, fast=TRUE)
+vegan::adonis2(pn12e_dist ~ phyloseq::sample_data(pn12e)$code)
+```
+
+### infant pn56
+```{r message = FALSE}
+pn56e_ord <- phyloseq::ordinate(pn56e, "PCoA", "unifrac", weighted=T)
+phyloseq::plot_scree(pn56e_ord) + geom_bar(stat = "identity", fill="blue") + labs(x="\nAxis", y="Proportion of Variance\n")
+head(pn56e_ord$values$Eigenvalues)
+
+pn56e_eig1 <- pn56e_ord$values$Eigenvalues[1]/sum(pn56e_ord$values$Eigenvalues)
+pn56e_eig2 <- pn56e_ord$values$Eigenvalues[2]/sum(pn56e_ord$values$Eigenvalues)
+phyloseq::plot_ordination(pn56e, pn56e_ord, color = "code") + 
+  geom_point(size=1) +
+  coord_fixed(pn56e_eig1/pn56e_eig2) +
+  stat_ellipse(aes(group=code), linetype=2)+
+  theme_bw()
+
+pn56e_dist <- UniFrac(pn56e, weighted = T, normalized = TRUE, parallel = FALSE, fast=TRUE)
+vegan::adonis2(pn56e_dist ~ phyloseq::sample_data(pn56e)$code)
+```
+
+
+## maternal 8 groups
+```{r message=FALSE}
+mother_ord <- phyloseq::ordinate(mother, "PCoA", "unifrac", weighted=T)
+phyloseq::plot_scree(mother_ord) + geom_bar(stat = "identity", fill="blue") + labs(x="\nAxis", y="Proportion of Variance\n")
+head(mother_ord$values$Eigenvalues)
+
+mother_eig1 <- mother_ord$values$Eigenvalues[1]/sum(mother_ord$values$Eigenvalues)
+mother_eig2 <- mother_ord$values$Eigenvalues[2]/sum(mother_ord$values$Eigenvalues)
+beta_mother <- phyloseq::plot_ordination(mother, mother_ord, color = "bep_group") + 
+scale_color_manual(
+    name="code", 
+    values = COLOR_SCHEME[1:8]
+    ) +
+  ggplot2::labs(
+    title = "Beta diversity, weighted unifrac, maternal samples",
+  ) +
+  geom_point(size=1) +
+  coord_fixed(mother_eig1/mother_eig2) +
+  stat_ellipse(aes(group=bep_group), linetype=2)+
+  theme_bw()+
+  theme(aspect.ratio = 1)
+beta_mother
+ggsave("beta_mother.png", width = 5, height = 5, units = "in", bg = "white")
+
+mother_dist <- UniFrac(mother, weighted = T, normalized = TRUE, parallel = FALSE, fast=TRUE)
+vegan::adonis2(mother_dist ~ phyloseq::sample_data(mother)$code + phyloseq::sample_data(mother)$timepoint)
+```
+
+### prenatal
+```{r}
+prenatal_ord <- phyloseq::ordinate(prenatal, "PCoA", "unifrac", weighted=T)
+phyloseq::plot_scree(prenatal_ord) + geom_bar(stat = "identity", fill="blue") + labs(x="\nAxis", y="Proportion of Variance\n")
+head(prenatal_ord$values$Eigenvalues)
+
+prenatal_eig1 <- prenatal_ord$values$Eigenvalues[1]/sum(prenatal_ord$values$Eigenvalues)
+prenatal_eig2 <- prenatal_ord$values$Eigenvalues[2]/sum(prenatal_ord$values$Eigenvalues)
+beta_prenatal<- phyloseq::plot_ordination(prenatal, prenatal_ord, color = "bep_group") + 
+scale_color_manual(
+    name="code", 
+    values = COLOR_SCHEME[1:8]
+    ) +
+  ggplot2::labs(
+    title = "Beta diversity, weighted unifrac, prenatal",
+  ) +
+  geom_point(size=1) +
+  coord_fixed(prenatal_eig1/prenatal_eig2) +
+  stat_ellipse(aes(group=bep_group), linetype=2)+
+  theme_bw()
+beta_prenatal
+ggsave("bep_beta_prenatal.png", width = 5, height = 5, units = "in", bg = "white")
+
+prenatal_dist <- UniFrac(prenatal, weighted = T, normalized = TRUE, parallel = FALSE, fast=TRUE)
+vegan::adonis2(prenatal_dist ~ phyloseq::sample_data(prenatal)$timepoint + phyloseq::sample_data(prenatal)$code)
+```
+
+### prenatal
+```{r}
+postnatal_ord <- phyloseq::ordinate(postnatal, "PCoA", "unifrac", weighted=T)
+phyloseq::plot_scree(postnatal_ord) + geom_bar(stat = "identity", fill="blue") + labs(x="\nAxis", y="Proportion of Variance\n")
+head(postnatal_ord$values$Eigenvalues)
+
+postnatal_eig1 <- postnatal_ord$values$Eigenvalues[1]/sum(postnatal_ord$values$Eigenvalues)
+postnatal_eig2 <- postnatal_ord$values$Eigenvalues[2]/sum(postnatal_ord$values$Eigenvalues)
+beta_postnatal<- phyloseq::plot_ordination(postnatal, postnatal_ord, color = "bep_group") + 
+scale_color_manual(
+    name="code", 
+    values = COLOR_SCHEME[1:8]
+    ) +
+  ggplot2::labs(
+    title = "Beta diversity, weighted unifrac, postnatal",
+  ) +
+  geom_point(size=1) +
+  coord_fixed(postnatal_eig1/postnatal_eig2) +
+  stat_ellipse(aes(group=bep_group), linetype=2)+
+  theme_bw()
+beta_postnatal
+ggsave("bep_beta_postnatal.png", width = 5, height = 5, units = "in", bg = "white")
+
+postnatal_dist <- UniFrac(postnatal, weighted = T, normalized = TRUE, parallel = FALSE, fast=TRUE)
+vegan::adonis2(postnatal_dist ~ phyloseq::sample_data(postnatal)$timepoint + phyloseq::sample_data(postnatal)$code)
+```
+
+
+
+
+### maternal incl
+```{r message = FALSE}
+incl_ord <- phyloseq::ordinate(incl, "PCoA", "unifrac", weighted=T)
+phyloseq::plot_scree(incl_ord) + geom_bar(stat = "identity", fill="blue") + labs(x="\nAxis", y="Proportion of Variance\n")
+head(incl_ord$values$Eigenvalues)
+
+incl_eig1 <- incl_ord$values$Eigenvalues[1]/sum(incl_ord$values$Eigenvalues)
+incl_eig2 <- incl_ord$values$Eigenvalues[2]/sum(incl_ord$values$Eigenvalues)
+phyloseq::plot_ordination(incl, incl_ord, color = "code") + 
+  geom_point(size=1) +
+  coord_fixed(incl_eig1/incl_eig2) +
+  stat_ellipse(aes(group=code), linetype=2)+
+  theme_bw()
+
+incl_dist <- UniFrac(incl, weighted = T, normalized = TRUE, parallel = FALSE, fast=TRUE)
+vegan::adonis2(incl_dist ~ phyloseq::sample_data(incl)$code)
+```
+
+
+### maternal tri3
+```{r message = FALSE}
+tri3_ord <- phyloseq::ordinate(tri3, "PCoA", "unifrac", weighted=T)
+phyloseq::plot_scree(tri3_ord) + geom_bar(stat = "identity", fill="blue") + labs(x="\nAxis", y="Proportion of Variance\n")
+head(tri3_ord$values$Eigenvalues)
+
+tri3_eig1 <- tri3_ord$values$Eigenvalues[1]/sum(tri3_ord$values$Eigenvalues)
+tri3_eig2 <- tri3_ord$values$Eigenvalues[2]/sum(tri3_ord$values$Eigenvalues)
+phyloseq::plot_ordination(tri3, tri3_ord, color = "code") + 
+  geom_point(size=1) +
+  coord_fixed(tri3_eig1/tri3_eig2) +
+  stat_ellipse(aes(group=code), linetype=2)+
+  theme_bw()
+
+tri3_dist <- UniFrac(tri3, weighted = T, normalized = TRUE, parallel = FALSE, fast=TRUE)
+vegan::adonis2(tri3_dist ~ phyloseq::sample_data(tri3)$code)
+```
+
+
+### maternal pn12 
+```{r message = FALSE}
+pn12m_ord <- phyloseq::ordinate(pn12m, "PCoA", "unifrac", weighted=T)
+phyloseq::plot_scree(pn12m_ord) + geom_bar(stat = "identity", fill="blue") + labs(x="\nAxis", y="Proportion of Variance\n")
+head(pn12m_ord$values$Eigenvalues)
+
+pn12m_eig1 <- pn12m_ord$values$Eigenvalues[1]/sum(pn12m_ord$values$Eigenvalues)
+pn12m_eig2 <- pn12m_ord$values$Eigenvalues[2]/sum(pn12m_ord$values$Eigenvalues)
+phyloseq::plot_ordination(pn12m, pn12m_ord, color = "code") + 
+  geom_point(size=1) +
+  coord_fixed(pn12m_eig1/pn12m_eig2) +
+  stat_ellipse(aes(group=code), linetype=2)+
+  theme_bw()
+
+pn12m_dist <- UniFrac(pn12m, weighted = T, normalized = TRUE, parallel = FALSE, fast=TRUE)
+vegan::adonis2(pn12m_dist ~ phyloseq::sample_data(pn12m)$code)
+```
+
+
+### maternal pn56 
+```{r message = FALSE}
+pn56m_ord <- phyloseq::ordinate(pn56m, "PCoA", "unifrac", weighted=T)
+phyloseq::plot_scree(pn56m_ord) + geom_bar(stat = "identity", fill="blue") + labs(x="\nAxis", y="Proportion of Variance\n")
+head(pn56m_ord$values$Eigenvalues)
+
+pn56m_eig1 <- pn56m_ord$values$Eigenvalues[1]/sum(pn56m_ord$values$Eigenvalues)
+pn56m_eig2 <- pn56m_ord$values$Eigenvalues[2]/sum(pn56m_ord$values$Eigenvalues)
+phyloseq::plot_ordination(pn56m, pn56m_ord, color = "code") + 
+  geom_point(size=1) +
+  coord_fixed(pn56m_eig1/pn56m_eig2) +
+  stat_ellipse(aes(group=code), linetype=2)+
+  theme_bw()
+
+pn56m_dist <- UniFrac(pn56m, weighted = T, normalized = TRUE, parallel = FALSE, fast=TRUE)
+vegan::adonis2(pn56m_dist ~ phyloseq::sample_data(pn56m)$code)
+```
+
+
+# Differential abundance (ANCOM-BC)
+Differential abundance is a statistical method to identify microbial taxa that are differentially abundant between different sample groups. This analysis is typically used to identify microbial taxa that are associated with specific environmental conditions or disease states. 
+The ANalysis of COmposition of Microbiomes with Bias Correction (ANCOM-BC) is a recently developed method for differential abundance testing.
+ANCOMBC incoporates the so called sampling fraction into the model. The latter term could be empirically estimated by the ratio of the library size to the microbial load. according to the authors, variations in this sampling fraction would bias differential abundance analyses if ignored. Furthermore, this method provides p-values and confidence intervals for each taxon. It also controls the FDR and it is computationally simple to implement.
+
+## at species level
+### infant pn12
+```{r message=FALSE}
+ancompn12e <- ancombc2(data=pn12e, 
+                        assay_name = "counts", tax_level = "species",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn12e_primres = ancompn12e$res
+DT::datatable(pn12e_primres)
+colnames(pn12e_primres)[colnames(pn12e_primres) == "taxon"] <- "species"
+pn12e_primres <- merge(pn12e_primres, taxonomy, by.x = "species", by.y = "species", all.x = TRUE)
+pn12e_primres <- pn12e_primres[, !colnames(pn12e_primres) %in% "strain"]
+pn12e_primres <- pn12e_primres[!duplicated(pn12e_primres), ]
+
+pn12e_ancombc <- pn12e_primres %>%
+  filter(`diff_codeB Z`== "TRUE") 
+DT::datatable(pn12e_ancombc)
+
+# Rename the "taxon" column to "species"
+colnames(pn12e_ancombc)[colnames(pn12e_ancombc) == "taxon"] <- "species"
+# Create a new SummarizedExperiment object by left joining with taxonomy
+pn12e_daa <- merge(pn12e_ancombc, taxonomy, by.x = "species", by.y = "species", all.x = TRUE)
+# Select the columns you want to keep (excluding "strain")
+pn12e_daa <- pn12e_daa[, !colnames(pn12e_daa) %in% "strain"]
+# Remove duplicate rows
+pn12e_daa <- pn12e_daa[!duplicated(pn12e_daa), ]
+DT::datatable(pn12e_daa)
+
+# visualization
+pn12eAncomAdj <- pn12e_primres |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "steelblue", "darkred")) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>1 & `q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(abs(`lfc_codeB Z`)<1 & `q_codeB Z` <1.3, "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 1) +
+  geom_vline(linetype = "dotted", xintercept = -1) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "Infant samples at postnal 1-2 months",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw() + xlim(-2, 2)
+pn12eAncomAdj
+
+# take into account sensitivity analysis
+pn12eAncomAdjSS <- pn12e_primres |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "steelblue", "darkred")) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>1 & `q_codeB Z` >1.3, species, NA_character_)) |>
+  mutate(color=if_else(abs(`lfc_codeB Z`)<1 & `q_codeB Z` <1.3, "#000000", color)) |>
+  mutate(color=if_else(`passed_ss_codeB Z` == FALSE, "grey55", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 1) +
+  geom_vline(linetype = "dotted", xintercept = -1) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "Infant samples at postnal 1-2 months",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw() + xlim(-2, 2)
+pn12eAncomAdjSS
+```
+
+
+### infant pn56
+```{r message=FALSE}
+ancompn56e <- ancombc2(data=pn56e, 
+                        assay_name = "counts", tax_level = "species",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn56e_primres = ancompn56e$res
+DT::datatable(pn56e_primres)
+colnames(pn56e_primres)[colnames(pn56e_primres) == "taxon"] <- "species"
+pn56e_primres <- merge(pn56e_primres, taxonomy, by.x = "species", by.y = "species", all.x = TRUE)
+pn56e_primres <- pn56e_primres[, !colnames(pn56e_primres) %in% "strain"]
+pn56e_primres <- pn56e_primres[!duplicated(pn56e_primres), ]
+
+pn56e_ancombc <- pn56e_primres %>%
+  filter(`diff_codeB Z`== "TRUE")
+DT::datatable(pn56e_ancombc)
+
+# Rename the "taxon" column to "species"
+colnames(pn56e_ancombc)[colnames(pn56e_ancombc) == "taxon"] <- "species"
+# Create a new SummarizedExperiment object by left joining with taxonomy
+pn56e_daa <- merge(pn56e_ancombc, taxonomy, by.x = "species", by.y = "species", all.x = TRUE)
+# Select the columns you want to keep (excluding "strain")
+pn56e_daa <- pn56e_daa[, !colnames(pn56e_daa) %in% "strain"]
+# Remove duplicate rows
+pn56e_daa <- pn56e_daa[!duplicated(pn56e_daa), ]
+DT::datatable(pn56e_daa)
+
+pn56eAncomAdj <- pn56e_primres |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "steelblue", "darkred")) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>1 & `q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(abs(`lfc_codeB Z`)<1 & `q_codeB Z` <1.3, "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 1) +
+  geom_vline(linetype = "dotted", xintercept = -1) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "Infant samples at postnal 5-6 months",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw() + xlim(-2, 2)
+pn56eAncomAdj
+
+pn56eAncomAdjSS <- pn56e_primres |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "steelblue", "darkred")) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>1 & `q_codeB Z` >1.3, species, NA_character_)) |>
+  mutate(color=if_else(abs(`lfc_codeB Z`)<1 & `q_codeB Z` <1.3, "#000000", color)) |>
+  mutate(color=if_else(`passed_ss_codeB Z` == FALSE, "grey55", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 1) +
+  geom_vline(linetype = "dotted", xintercept = -1) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "Infant samples at postnal 5-6 months",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw() + xlim(-2, 2)
+pn56eAncomAdjSS
+```
+
+
+
+### maternal incl 
+```{r message=FALSE}
+ancomincl <- ancombc2(data=incl,
+                        assay_name = "counts", tax_level = "species",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+incl_primres = ancomincl$res
+DT::datatable(incl_primres)
+colnames(incl_primres)[colnames(incl_primres) == "taxon"] <- "species"
+incl_primres <- merge(incl_primres, taxonomy, by.x = "species", by.y = "species", all.x = TRUE)
+incl_primres <- incl_primres[, !colnames(incl_primres) %in% "strain"]
+incl_primres <- incl_primres[!duplicated(incl_primres), ]
+
+incl_ancombc <- incl_primres %>%
+  filter(`diff_codeB Z`== "TRUE")
+DT::datatable(incl_ancombc)
+
+# Rename the "taxon" column to "species"
+colnames(incl_ancombc)[colnames(incl_ancombc) == "taxon"] <- "species"
+# Create a new SummarizedExperiment object by left joining with taxonomy
+incl_daa <- merge(incl_ancombc, taxonomy, by.x = "species", by.y = "species", all.x = TRUE)
+# Select the columns you want to keep (excluding "strain")
+incl_daa <- incl_daa[, !colnames(incl_daa) %in% "strain"]
+# Remove duplicate rows
+incl_daa <- incl_daa[!duplicated(incl_daa), ]
+DT::datatable(incl_daa)
+
+inclAncomAdj <- incl_primres |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "steelblue", "darkred")) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>1 & `q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(abs(`lfc_codeB Z`)<1 & `q_codeB Z` <1.3, "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 1) +
+  geom_vline(linetype = "dotted", xintercept = -1) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 40, na.rm = TRUE, size = 3.5, box.padding = 0.5) +
+  labs(title = "Maternal samples at inclusion",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw() + xlim(-2, 2) + ylim(0, 2.3)
+inclAncomAdj
+
+inclAncomAdjSS <- incl_primres |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "steelblue", "darkred")) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>1 & `q_codeB Z` >1.3, species, NA_character_)) |>
+  mutate(color=if_else(abs(`lfc_codeB Z`)<1 & `q_codeB Z` <1.3, "#000000", color)) |>
+  mutate(color=if_else(`passed_ss_codeB Z` == FALSE, "grey55", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 1) +
+  geom_vline(linetype = "dotted", xintercept = -1) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 40, na.rm = TRUE, size = 3.5, box.padding = 0.5) +
+  labs(title = "Maternal samples at inclusion",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw() + xlim(-2, 2) + ylim(0, 2.3)
+inclAncomAdjSS
+```
+
+
+### maternal tri3
+```{r message=FALSE}
+ancomtri3 <- ancombc2(data=tri3, 
+                        assay_name = "counts", tax_level = "species",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+tri3_primres = ancomtri3$res
+DT::datatable(tri3_primres)
+colnames(tri3_primres)[colnames(tri3_primres) == "taxon"] <- "species"
+tri3_primres <- merge(tri3_primres, taxonomy, by.x = "species", by.y = "species", all.x = TRUE)
+tri3_primres <- tri3_primres[, !colnames(tri3_primres) %in% "strain"]
+tri3_primres <- tri3_primres[!duplicated(tri3_primres), ]
+
+tri3_ancombc <- tri3_primres %>%
+  filter(`diff_codeB Z`== "TRUE")
+DT::datatable(tri3_ancombc)
+
+# Rename the "taxon" column to "species"
+colnames(tri3_ancombc)[colnames(tri3_ancombc) == "taxon"] <- "species"
+# Create a new SummarizedExperiment object by left joining with taxonomy
+tri3_daa <- merge(tri3_ancombc, taxonomy, by.x = "species", by.y = "species", all.x = TRUE)
+# Select the columns you want to keep (excluding "strain")
+tri3_daa <- tri3_daa[, !colnames(tri3_daa) %in% "strain"]
+# Remove duplicate rows
+tri3_daa <- tri3_daa[!duplicated(tri3_daa), ]
+DT::datatable(tri3_daa)
+
+tri3AncomAdj <- tri3_primres |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "steelblue", "darkred")) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>1 & `q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(abs(`lfc_codeB Z`)<1 & `q_codeB Z` <1.3, "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 1) +
+  geom_vline(linetype = "dotted", xintercept = -1) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "Maternal samples at trimester 3",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw() + xlim(-2, 2)
+tri3AncomAdj
+
+tri3AncomAdjSS <- tri3_primres |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "steelblue", "darkred")) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>1 & `q_codeB Z` >1.3, species, NA_character_)) |>
+  mutate(color=if_else(abs(`lfc_codeB Z`)<1 & `q_codeB Z` <1.3, "#000000", color)) |>
+  mutate(color=if_else(`passed_ss_codeB Z` == FALSE, "grey55", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 1) +
+  geom_vline(linetype = "dotted", xintercept = -1) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "Maternal samples at trimester 3",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw() + xlim(-2, 2)
+tri3AncomAdjSS
+```
+
+
+### maternal pn12
+```{r message=FALSE}
+ancompn12m <- ancombc2(data=pn12m, 
+                        assay_name = "counts", tax_level = "species",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn12m_primres = ancompn12m$res
+DT::datatable(pn12m_primres)
+colnames(pn12m_primres)[colnames(pn12m_primres) == "taxon"] <- "species"
+pn12m_primres <- merge(pn12m_primres, taxonomy, by.x = "species", by.y = "species", all.x = TRUE)
+pn12m_primres <- pn12m_primres[, !colnames(pn12m_primres) %in% "strain"]
+pn12m_primres <- pn12m_primres[!duplicated(pn12m_primres), ]
+
+pn12m_ancombc <- pn12m_primres %>%
+  filter(`diff_codeB Z`== "TRUE")
+DT::datatable(pn12m_ancombc)
+
+# Rename the "taxon" column to "species"
+colnames(pn12m_ancombc)[colnames(pn12m_ancombc) == "taxon"] <- "species"
+# Create a new SummarizedExperiment object by left joining with taxonomy
+pn12m_daa <- merge(pn12m_ancombc, taxonomy, by.x = "species", by.y = "species", all.x = TRUE)
+# Select the columns you want to keep (excluding "strain")
+pn12m_daa <- pn12m_daa[, !colnames(pn12m_daa) %in% "strain"]
+# Remove duplicate rows
+pn12m_daa <- pn12m_daa[!duplicated(pn12m_daa), ]
+DT::datatable(pn12m_daa)
+
+pn12mAncomAdj <- pn12m_primres |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "steelblue", "darkred")) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>1 & `q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(abs(`lfc_codeB Z`)<1 & `q_codeB Z` <1.3, "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 1) +
+  geom_vline(linetype = "dotted", xintercept = -1) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE, box.padding = 0.6) +
+  labs(title = "Maternal samples at postnal 1-2 months",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw() + xlim(-2, 2) + ylim(0, 7)
+pn12mAncomAdj
+
+pn12mAncomAdjSS <- pn12m_primres |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "steelblue", "darkred")) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>1 & `q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(abs(`lfc_codeB Z`)<1 & `q_codeB Z` <1.3, "#000000", color)) |>
+  mutate(color=if_else(`passed_ss_codeB Z` == FALSE, "grey55", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 1) +
+  geom_vline(linetype = "dotted", xintercept = -1) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE, box.padding = 0.6) +
+  labs(title = "Maternal samples at postnal 1-2 months",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw() + xlim(-2, 2) + ylim(0, 7)
+pn12mAncomAdjSS
+```
+
+
+### maternal pn56
+```{r message=FALSE}
+ancompn56m <- ancombc2(data=pn56m, 
+                        assay_name = "counts", tax_level = "species",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn56m_primres = ancompn56m$res
+DT::datatable(pn56m_primres)
+colnames(pn56m_primres)[colnames(pn56m_primres) == "taxon"] <- "species"
+pn56m_primres <- merge(pn56m_primres, taxonomy, by.x = "species", by.y = "species", all.x = TRUE)
+pn56m_primres <- pn56m_primres[, !colnames(pn56m_primres) %in% "strain"]
+pn56m_primres <- pn56m_primres[!duplicated(pn56m_primres), ]
+
+pn56m_ancombc <- pn56m_primres %>%
+  filter(`diff_codeB Z`== "TRUE")
+DT::datatable(pn56m_ancombc)
+
+# Rename the "taxon" column to "species"
+colnames(pn56m_ancombc)[colnames(pn56m_ancombc) == "taxon"] <- "species"
+# Create a new SummarizedExperiment object by left joining with taxonomy
+pn56m_daa <- merge(pn56m_ancombc, taxonomy, by.x = "species", by.y = "species", all.x = TRUE)
+# Select the columns you want to keep (excluding "strain")
+pn56m_daa <- pn56m_daa[, !colnames(pn56m_daa) %in% "strain"]
+# Remove duplicate rows
+pn56m_daa <- pn56m_daa[!duplicated(pn56m_daa), ]
+DT::datatable(pn56m_daa)
+
+pn56mAncomAdj <- pn56m_primres |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "steelblue", "darkred")) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>1 & `q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(abs(`lfc_codeB Z`)<1 & `q_codeB Z` <1.3, "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 1) +
+  geom_vline(linetype = "dotted", xintercept = -1) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "Maternal samples at postnal 5-6 months",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw() + xlim(-2, 2)
+pn56mAncomAdj
+
+pn56mAncomAdjSS <- pn56m_primres |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "steelblue", "darkred")) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>1 & `q_codeB Z` >1.3, species, NA_character_)) |>
+  mutate(color=if_else(abs(`lfc_codeB Z`)<1 & `q_codeB Z` <1.3, "#000000", color)) |>
+  mutate(color=if_else(`passed_ss_codeB Z` == FALSE, "grey55", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 1) +
+  geom_vline(linetype = "dotted", xintercept = -1) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "Maternal samples at postnal 5-6 months",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw() + xlim(-2, 2)
+pn56mAncomAdjSS
+```
+
+
+## at genus level
+### infant pn12
+```{r message=FALSE, eval=FALSE}
+ancompn12e_genus <- ancombc2(data=pn12e, 
+                        assay_name = "counts", tax_level = "genus",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn12e_primres_genus = ancompn12e_genus$res
+DT::datatable(pn12e_primres_genus)
+
+pn12e_ancombc_genus <- pn12e_primres_genus %>%
+  filter(`diff_codeB Z`== "TRUE")
+DT::datatable(pn12e_ancombc_genus)
+
+pn12eAncomAdj_genus <- pn12e_primres_genus |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, infant samples at postnal 1-2 months, genus level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+pn12eAncomAdj_genus
+```
+
+
+
+### infant pn56
+```{r message=FALSE, eval=FALSE}
+ancompn56e_genus <- ancombc2(data=pn56e, 
+                        assay_name = "counts", tax_level = "genus",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn56e_primres_genus = ancompn56e_genus$res
+DT::datatable(pn56e_primres_genus)
+
+pn56e_ancombc_genus <- pn56e_primres_genus %>%
+  filter(`diff_codeB Z`== "TRUE")
+DT::datatable(pn56e_ancombc_genus)
+
+pn56eAncomAdj_genus <- pn56e_primres_genus |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, infant samples at postnal 5-6 months, genus level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+pn56eAncomAdj_genus
+```
+
+
+
+### maternal incl 
+```{r message=FALSE, eval=FALSE}
+ancomincl_genus <- ancombc2(data=incl, 
+                        assay_name = "counts", tax_level = "genus",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+incl_primres_genus = ancomincl_genus$res
+DT::datatable(incl_primres_genus)
+
+incl_ancombc_genus <- incl_primres_genus %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(incl_ancombc_genus)
+
+inclAncomAdj_genus <- incl_primres_genus |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, maternal samples at inclusion, genus level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+inclAncomAdj_genus
+```
+
+
+### maternal tri3
+```{r message=FALSE, eval=FALSE}
+ancomtri3_genus <- ancombc2(data=tri3, 
+                        assay_name = "counts", tax_level = "genus",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+tri3_primres_genus = ancomtri3_genus$res
+DT::datatable(tri3_primres_genus)
+
+tri3_ancombc_genus <- tri3_primres_genus %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(tri3_ancombc_genus)
+
+tri3AncomAdj_genus <- tri3_primres_genus |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, maternal samples at trimester 3, genus level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+tri3AncomAdj_genus
+```
+
+
+### maternal pn12
+```{r message=FALSE, eval=FALSE}
+ancompn12m_genus <- ancombc2(data=pn12m, 
+                        assay_name = "counts", tax_level = "genus",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn12m_primres_genus = ancompn12m_genus$res
+DT::datatable(pn12m_primres_genus)
+
+pn12m_ancombc_genus <- pn12m_primres_genus %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(pn12m_ancombc_genus)
+
+pn12mAncomAdj_genus <- pn12m_primres_genus |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, maternal samples at postnal 1-2 months, genus level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+pn12mAncomAdj_genus
+```
+
+
+### maternal pn56
+```{r message=FALSE, eval=FALSE}
+ancompn56m_genus <- ancombc2(data=pn56m, 
+                        assay_name = "counts", tax_level = "genus",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn56m_primres_genus = ancompn56m_genus$res
+DT::datatable(pn56m_primres_genus)
+
+pn56m_ancombc_genus <- pn56m_primres_genus %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(pn56m_ancombc_genus)
+
+pn56mAncomAdj_genus <- pn56m_primres_genus |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, maternal samples at postnal 5-6 months, genus level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+pn56mAncomAdj_genus
+```
+
+
+## at family level
+### infant pn12
+```{r message=FALSE, eval=FALSE}
+ancompn12e_family <- ancombc2(data=pn12e, 
+                        assay_name = "counts", tax_level = "family",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn12e_primres_family = ancompn12e_family$res
+DT::datatable(pn12e_primres_family)
+
+pn12e_ancombc_family <- pn12e_primres_family %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(pn12e_ancombc_family)
+
+pn12eAncomAdj_family <- pn12e_primres_family |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, infant samples at postnal 1-2 months, family level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+pn12eAncomAdj_family
+```
+
+
+
+### infant pn56
+```{r message=FALSE, eval=FALSE}
+ancompn56e_family <- ancombc2(data=pn56e, 
+                        assay_name = "counts", tax_level = "family",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn56e_primres_family = ancompn56e_family$res
+DT::datatable(pn56e_primres_family)
+
+pn56e_ancombc_family <- pn56e_primres_family %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(pn56e_ancombc_family)
+
+pn56eAncomAdj_family <- pn56e_primres_family |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, infant samples at postnal 5-6 months, family level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+pn56eAncomAdj_family
+```
+
+
+
+### maternal incl 
+```{r message=FALSE, eval=FALSE}
+ancomincl_family <- ancombc2(data=incl, 
+                        assay_name = "counts", tax_level = "family",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+incl_primres_family = ancomincl_family$res
+DT::datatable(incl_primres_family)
+
+incl_ancombc_family <- incl_primres_family %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(incl_ancombc_family)
+
+inclAncomAdj_family <- incl_primres_family |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, maternal samples at inclusion, family level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+inclAncomAdj_family
+```
+
+
+### maternal tri3
+```{r message=FALSE, eval=FALSE}
+ancomtri3_family <- ancombc2(data=tri3, 
+                        assay_name = "counts", tax_level = "family",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+tri3_primres_family = ancomtri3_family$res
+DT::datatable(tri3_primres_family)
+
+tri3_ancombc_family <- tri3_primres_family %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(tri3_ancombc_family)
+
+tri3AncomAdj_family <- tri3_primres_family |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 30, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, maternal samples at trimester 3, family level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+tri3AncomAdj_family
+```
+
+
+### maternal pn12
+```{r message=FALSE, eval=FALSE}
+ancompn12m_family <- ancombc2(data=pn12m, 
+                        assay_name = "counts", tax_level = "family",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn12m_primres_family = ancompn12m_family$res
+DT::datatable(pn12m_primres_family)
+
+pn12m_ancombc_family <- pn12m_primres_family %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(pn12m_ancombc_family)
+
+pn12mAncomAdj_family <- pn12m_primres_family |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, maternal samples at postnal 1-2 months, family level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+pn12mAncomAdj_family
+```
+
+
+### maternal pn56
+```{r message=FALSE, eval=FALSE}
+ancompn56m_family <- ancombc2(data=pn56m, 
+                        assay_name = "counts", tax_level = "family",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn56m_primres_family = ancompn56m_family$res
+DT::datatable(pn56m_primres_family)
+
+pn56m_ancombc_family <- pn56m_primres_family %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(pn56m_ancombc_family)
+
+pn56mAncomAdj_family <- pn56m_primres_family |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, maternal samples at postnal 5-6 months, family level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+pn56mAncomAdj_family
+```
+
+
+## at order level
+### infant pn12
+```{r message=FALSE, eval=FALSE}
+ancompn12e_order <- ancombc2(data=pn12e, 
+                        assay_name = "counts", tax_level = "order",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn12e_primres_order = ancompn12e_order$res
+DT::datatable(pn12e_primres_order)
+
+pn12e_ancombc_order <- pn12e_primres_order %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(pn12e_ancombc_order)
+
+pn12eAncomAdj_order <- pn12e_primres_order |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, infant samples at postnal 1-2 months, order level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+pn12eAncomAdj_order
+```
+
+
+
+### infant pn56
+```{r message=FALSE, eval=FALSE}
+ancompn56e_order <- ancombc2(data=pn56e, 
+                        assay_name = "counts", tax_level = "order",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn56e_primres_order = ancompn56e_order$res
+DT::datatable(pn56e_primres_order)
+
+pn56e_ancombc_order <- pn56e_primres_order %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(pn56e_ancombc_order)
+
+pn56eAncomAdj_order <- pn56e_primres_order |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, infant samples at postnal 5-6 months, order level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+pn56eAncomAdj_order
+```
+
+
+
+### maternal incl 
+```{r message=FALSE, eval=FALSE}
+ancomincl_order <- ancombc2(data=incl, 
+                        assay_name = "counts", tax_level = "order",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+incl_primres_order = ancomincl_order$res
+DT::datatable(incl_primres_order)
+
+incl_ancombc_order <- incl_primres_order %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(incl_ancombc_order)
+
+inclAncomAdj_order <- incl_primres_order |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, maternal samples at inclusion, order level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+inclAncomAdj_order
+```
+
+
+### maternal tri3
+```{r message=FALSE, eval=FALSE}
+ancomtri3_order <- ancombc2(data=tri3, 
+                        assay_name = "counts", tax_level = "order",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+tri3_primres_order = ancomtri3_order$res
+DT::datatable(tri3_primres_order)
+
+tri3_ancombc_order <- tri3_primres_order %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(tri3_ancombc_order)
+
+tri3AncomAdj_order <- tri3_primres_order |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, maternal samples at trimester 3, order level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+tri3AncomAdj_order
+```
+
+
+### maternal pn12
+```{r message=FALSE, eval=FALSE}
+ancompn12m_order <- ancombc2(data=pn12m, 
+                        assay_name = "counts", tax_level = "order",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn12m_primres_order = ancompn12m_order$res
+DT::datatable(pn12m_primres_order)
+
+pn12m_ancombc_order <- pn12m_primres_order %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(pn12m_ancombc_order)
+
+pn12mAncomAdj_order <- pn12m_primres_order |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, maternal samples at postnal 1-2 months, order level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+pn12mAncomAdj_order
+```
+
+
+### maternal pn56
+```{r message=FALSE, eval=FALSE}
+ancompn56m_order <- ancombc2(data=pn56m, 
+                        assay_name = "counts", tax_level = "order",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn56m_primres_order = ancompn56m_order$res
+DT::datatable(pn56m_primres_order)
+
+pn56m_ancombc_order <- pn56m_primres_order %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(pn56m_ancombc_order)
+
+pn56mAncomAdj_order <- pn56m_primres_order |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, maternal samples at postnal 5-6 months, order level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+pn56mAncomAdj_order
+```
+
+
+## at class level
+### infant pn12
+```{r message=FALSE, eval=FALSE}
+ancompn12e_class <- ancombc2(data=pn12e, 
+                        assay_name = "counts", tax_level = "class",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn12e_primres_class = ancompn12e_class$res
+DT::datatable(pn12e_primres_class)
+
+pn12e_ancombc_class <- pn12e_primres_class %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(pn12e_ancombc_class)
+
+pn12eAncomAdj_class <- pn12e_primres_class |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, infant samples at postnal 1-2 months, class level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+pn12eAncomAdj_class
+```
+
+
+
+### infant pn56
+```{r message=FALSE, eval=FALSE}
+ancompn56e_class <- ancombc2(data=pn56e, 
+                        assay_name = "counts", tax_level = "class",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn56e_primres_class = ancompn56e_class$res
+DT::datatable(pn56e_primres_class)
+
+pn56e_ancombc_class <- pn56e_primres_class %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(pn56e_ancombc_class)
+
+pn56eAncomAdj_class <- pn56e_primres_class |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, infant samples at postnal 5-6 months, class level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+pn56eAncomAdj_class
+```
+
+
+
+### maternal incl 
+```{r message=FALSE, eval=FALSE}
+ancomincl_class <- ancombc2(data=incl, 
+                        assay_name = "counts", tax_level = "class",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+incl_primres_class = ancomincl_class$res
+DT::datatable(incl_primres_class)
+
+incl_ancombc_class <- incl_primres_class %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(incl_ancombc_class)
+
+inclAncomAdj_class <- incl_primres_class |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, maternal samples at inclusion, class level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+inclAncomAdj_class
+```
+
+
+### maternal tri3
+```{r message=FALSE, eval=FALSE}
+ancomtri3_class <- ancombc2(data=tri3, 
+                        assay_name = "counts", tax_level = "class",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+tri3_primres_class = ancomtri3_class$res
+DT::datatable(tri3_primres_class)
+
+tri3_ancombc_class <- tri3_primres_class %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(tri3_ancombc_class)
+
+tri3AncomAdj_class <- tri3_primres_class |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, maternal samples at trimester 3, class level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+tri3AncomAdj_class
+```
+
+
+### maternal pn12
+```{r message=FALSE, eval=FALSE}
+ancompn12m_class <- ancombc2(data=pn12m, 
+                        assay_name = "counts", tax_level = "class",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn12m_primres_class = ancompn12m_class$res
+DT::datatable(pn12m_primres_class)
+
+pn12m_ancombc_class <- pn12m_primres_class %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(pn12m_ancombc_class)
+
+pn12mAncomAdj_class <- pn12m_primres_class |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, maternal samples at postnal 1-2 months, class level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+pn12mAncomAdj_class
+```
+
+
+### maternal pn56
+```{r message=FALSE, eval=FALSE}
+ancompn56m_class <- ancombc2(data=pn56m, 
+                        assay_name = "counts", tax_level = "class",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn56m_primres_class = ancompn56m_class$res
+DT::datatable(pn56m_primres_class)
+
+pn56m_ancombc_class <- pn56m_primres_class %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(pn56m_ancombc_class)
+
+pn56mAncomAdj_class <- pn56m_primres_class |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, maternal samples at postnal 5-6 months, class level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+pn56mAncomAdj_class
+```
+
+
+## at phylum level
+### infant pn12
+```{r message=FALSE, eval=FALSE}
+ancompn12e_phylum <- ancombc2(data=pn12e, 
+                        assay_name = "counts", tax_level = "phylum",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn12e_primres_phylum = ancompn12e_phylum$res
+DT::datatable(pn12e_primres_phylum)
+
+pn12e_ancombc_phylum <- pn12e_primres_phylum %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(pn12e_ancombc_phylum)
+
+pn12eAncomAdj_phylum <- pn12e_primres_phylum |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, infant samples at postnal 1-2 months, phylum level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+pn12eAncomAdj_phylum
+```
+
+
+
+### infant pn56
+```{r message=FALSE, eval=FALSE}
+ancompn56e_phylum <- ancombc2(data=pn56e, 
+                        assay_name = "counts", tax_level = "phylum",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn56e_primres_phylum = ancompn56e_phylum$res
+DT::datatable(pn56e_primres_phylum)
+
+pn56e_ancombc_phylum <- pn56e_primres_phylum %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(pn56e_ancombc_phylum)
+
+pn56eAncomAdj_phylum <- pn56e_primres_phylum |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, infant samples at postnal 5-6 months, phylum level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+pn56eAncomAdj_phylum
+```
+
+
+
+### maternal incl 
+```{r message=FALSE, eval=FALSE}
+ancomincl_phylum <- ancombc2(data=incl, 
+                        assay_name = "counts", tax_level = "phylum",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+incl_primres_phylum = ancomincl_phylum$res
+DT::datatable(incl_primres_phylum)
+
+incl_ancombc_phylum <- incl_primres_phylum %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(incl_ancombc_phylum)
+
+inclAncomAdj_phylum <- incl_primres_phylum |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, maternal samples at inclusion, phylum level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+inclAncomAdj_phylum
+```
+
+
+### maternal tri3
+```{r message=FALSE, eval=FALSE}
+ancomtri3_phylum <- ancombc2(data=tri3, 
+                        assay_name = "counts", tax_level = "phylum",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+tri3_primres_phylum = ancomtri3_phylum$res
+DT::datatable(tri3_primres_phylum)
+
+tri3_ancombc_phylum <- tri3_primres_phylum %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(tri3_ancombc_phylum)
+
+tri3AncomAdj_phylum <- tri3_primres_phylum |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, maternal samples at trimester 3, phylum level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+tri3AncomAdj_phylum
+```
+
+
+### maternal pn12
+```{r message=FALSE, eval=FALSE}
+ancompn12m_phylum <- ancombc2(data=pn12m, 
+                        assay_name = "counts", tax_level = "phylum",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn12m_primres_phylum = ancompn12m_phylum$res
+DT::datatable(pn12m_primres_phylum)
+
+pn12m_ancombc_phylum <- pn12m_primres_phylum %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(pn12m_ancombc_phylum)
+
+pn12mAncomAdj_phylum <- pn12m_primres_phylum |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, maternal samples at postnal 1-2 months, phylum level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+pn12mAncomAdj_phylum
+```
+
+
+### maternal pn56
+```{r message=FALSE, eval=FALSE}
+ancompn56m_phylum <- ancombc2(data=pn56m, 
+                        assay_name = "counts", tax_level = "phylum",
+                        fix_formula = "code", rand_formula = NULL,
+                        p_adj_method = "BH", 
+                        prv_cut = 0.1,
+                        lib_cut = 1000, s0_perc = 0.05,
+                        group = "code", struc_zero = TRUE, neg_lb = TRUE,
+                        alpha = 0.05, n_cl = 2, verbose = TRUE,
+                        global = F, pairwise = F, dunnet = F, trend = F,
+                        iter_control = list(tol=1e-2, max_iter=1, verbose=TRUE),
+                        em_control = list(tol=1e-5, max_iter=100),
+                        lme_control = lme4::lmerControl(),
+                        mdfdr_control = list(fwer_ctrl_method = "BH", B=1000),
+                        trend_control = list(contrast=list(matrix(c(1,0,-1,1),
+                                                                  nrow = 2,
+                                                                  byrow = TRUE)),
+                                             node=list(2),
+                                             solver="ECOS",
+                                             B=10))
+
+pn56m_primres_phylum = ancompn56m_phylum$res
+DT::datatable(pn56m_primres_phylum)
+
+pn56m_ancombc_phylum <- pn56m_primres_phylum %>%
+  filter(`p_codeB Z`< 0.05)
+DT::datatable(pn56m_ancombc_phylum)
+
+pn56mAncomAdj_phylum <- pn56m_primres_phylum |>
+  mutate(`q_codeB Z`=-log10(`q_codeB Z`)) |>
+  mutate(label=if_else(abs(`lfc_codeB Z`)>2, taxon, NA_character_)) |>
+  mutate(label=if_else(`q_codeB Z` >1.3, taxon, NA_character_)) |>
+  mutate(color=if_else(`lfc_codeB Z`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_codeB Z`, `q_codeB Z`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "ANCOM-BC, maternal samples at postnal 5-6 months, phylum level",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+pn56mAncomAdj_phylum
+```
+
+
+# Functional analysis
+## Pathways
+## Formatting
+Before we start modelling, we perform a few formatting steps on the data. 
+1. We split the data into subsets to analyse separately (because the treatment effect on specific genes will likely be different for mothers and infants and different at each timepoint).
+2. We apply two different, common transformations on the data to deal with zero-inflation and variance in sequencing depth, a variance stabilizing transformation (VST) and a total sum scaling (TSS).
+3. We combine everything into TreeSummarizedExperiment (TSE) R objects.
+
+### maternal
+```{r splitting data maternal, include=FALSE}
+# metadata
+metadata_mat <- metadata[metadata$child == "no", ]
+metadata_mat_incl <-metadata_mat[metadata_mat$timepoint == "incl", ]
+metadata_mat_tri3 <-metadata_mat[metadata_mat$timepoint == "tri3", ]
+metadata_mat_pn12 <-metadata_mat[metadata_mat$timepoint == "pn12", ]
+metadata_mat_pn56 <-metadata_mat[metadata_mat$timepoint == "pn56", ]
+
+# counts
+gene_counts_mat <- gene_counts[, rownames(metadata_mat)]
+gene_counts_mat <- gene_counts_mat[rowSums(gene_counts_mat) != 0, ]
+gene_counts_mat_incl <- gene_counts_mat[, rownames(metadata_mat_incl)]
+gene_counts_mat_tri3 <- gene_counts_mat[, rownames(metadata_mat_tri3)]
+gene_counts_mat_pn12 <- gene_counts_mat[, rownames(metadata_mat_pn12)]
+gene_counts_mat_pn56 <- gene_counts_mat[, rownames(metadata_mat_pn56)]
+
+# hierarchy
+anno_mat <- gene_anno[rownames(gene_counts_mat), ]
+phylogenetic_tree_mat <- TreeSummarizedExperiment::toTree(
+  data = anno_mat
+  )
+
+# fix order
+metadata_mat_incl <- metadata_mat_incl[colnames(gene_counts_mat_incl), ]
+metadata_mat_tri3 <- metadata_mat_tri3[colnames(gene_counts_mat_tri3), ]
+metadata_mat_pn12 <- metadata_mat_pn12[colnames(gene_counts_mat_pn12), ]
+metadata_mat_pn56 <- metadata_mat_pn56[colnames(gene_counts_mat_pn56), ]
+```
+
+
+### infant
+```{r transforming infant, include=FALSE}
+# TSS
+scaled_counts_inf_pn12 <- data.frame(
+  scaled_integer_transform_counts(prop.table(as.matrix(gene_counts_inf_pn12), 2))
+  )
+scaled_counts_inf_pn56 <- data.frame(
+  scaled_integer_transform_counts(prop.table(as.matrix(gene_counts_inf_pn56), 2))
+  )
+```
+
+## TSE TreeSummarizedExperiment
+### infant
+```{r TSE objects infant, include=FALSE}
+# TSS
+tse_object_scaled_inf_pn12 <- TreeSummarizedExperiment::TreeSummarizedExperiment(
+  assays = list(count = as.matrix(scaled_counts_inf_pn12)),
+  rowData = anno_inf,
+  colData = metadata_inf_pn12,
+  rowTree = phylogenetic_tree_inf,
+  rowNodeLab = rownames(scaled_counts_inf_pn12)
+)
+tse_object_scaled_inf_pn56 <- TreeSummarizedExperiment::TreeSummarizedExperiment(
+  assays = list(count = as.matrix(scaled_counts_inf_pn56)),
+  rowData = anno_inf,
+  colData = metadata_inf_pn56,
+  rowTree = phylogenetic_tree_inf,
+  rowNodeLab = rownames(scaled_counts_inf_pn56)
+)
+```
+
+### maternal
+```{r TSE objects maternal, include=FALSE}
+# TSS objects
+tse_object_scaled_mat_incl <- TreeSummarizedExperiment::TreeSummarizedExperiment(
+  assays = list(count = as.matrix(scaled_counts_mat_incl)),
+  rowData = anno_mat,
+  colData = metadata_mat_incl,
+  rowTree = phylogenetic_tree_mat,
+  rowNodeLab = rownames(scaled_counts_mat_incl)
+)
+tse_object_scaled_mat_tri3 <- TreeSummarizedExperiment::TreeSummarizedExperiment(
+  assays = list(count = as.matrix(scaled_counts_mat_tri3)),
+  rowData = anno_mat,
+  colData = metadata_mat_tri3,
+  rowTree = phylogenetic_tree_mat,
+  rowNodeLab = rownames(scaled_counts_mat_tri3)
+)
+tse_object_scaled_mat_pn12 <- TreeSummarizedExperiment::TreeSummarizedExperiment(
+  assays = list(count = as.matrix(scaled_counts_mat_pn12)),
+  rowData = anno_mat,
+  colData = metadata_mat_pn12,
+  rowTree = phylogenetic_tree_mat,
+  rowNodeLab = rownames(scaled_counts_mat_pn12)
+)
+tse_object_scaled_mat_pn56 <- TreeSummarizedExperiment::TreeSummarizedExperiment(
+  assays = list(count = as.matrix(scaled_counts_mat_pn56)),
+  rowData = anno_mat,
+  colData = metadata_mat_pn56,
+  rowTree = phylogenetic_tree_mat,
+  rowNodeLab = rownames(scaled_counts_mat_pn56)
+)
+```
+
+
+## Modelling
+We can group genes into specific hierarchies based on enzymatic classes, metabolic function etc. and test across these hierarchic levels This can help to find specific functional classes that are differential as a whole where the individual gene would not have showed up, testing all levels increases the false discovery rate and can have issues of multicolinearity. treeclimbR solves this by precomputing the most interesting candidates to test for differential abundance ([Huang et al., 2021](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-021-02368-1)).
+
+```{r volcano plot function, include=FALSE}
+#' Create a volcano plot from the outputs of a differential abundance analysis
+#'
+#' @param results A list containing the DA results as outputted in the
+#' `treeclimbR::evalCand` function.
+#' @param alpha a numeric alpha level on which to cut off p-values
+#' @param effect_cutoff a numeric log fold change on which to cut off log FCs
+#' @param color_scheme a list of hex valued colors indicating a scheme.
+#' @param title title for the plot to export
+#'
+#' @examples volcano_plot(results, color_scheme)
+#' @export
+volcano_plot <- function(results,
+                         alpha = 0.1,
+                         effect_cutoff = 2,
+                         color_scheme, 
+                         title = "Differential abundance analysis: Volcano plot") {
+  # extract elements
+  scores <- results$output
+
+  # color on significance groups and add tooltips
+  volcano_plot_df <- scores %>%
+    mutate(
+      significance_group = dplyr::if_else(
+        abs(logFC) < effect_cutoff & PValue > alpha,
+        "Non-significant",
+        dplyr::if_else(
+          abs(logFC) < effect_cutoff,
+          "Statistically significant (p-values)",
+          dplyr::if_else(
+            PValue > alpha,
+            "Biologically significant (FC)",
+            "Biologically & statistically significant"
+          )
+        )
+      ),
+      text = paste0(
+        "Taxon: ", names, "\n",
+        "p-value: ", PValue, "\n",
+        "log FC: ", round(logFC, 4), "\n"
+      )
+    )
+
+  p <- ggplot2::ggplot(
+    volcano_plot_df,
+    ggplot2::aes(
+      x = logFC, y = -log10(PValue),
+      color = significance_group,
+      text = text
+    )
+  ) +
+    ggplot2::geom_point(size = 3, alpha = 0.8) +
+    ggplot2::theme_bw() +
+    ggplot2::scale_color_manual(
+      values = c(
+        "Non-significant" = "#9EA0A5",
+        "Biologically significant (FC)" = color_scheme[1],
+        "Statistically significant (p-values)" = color_scheme[3],
+        "Biologically & statistically significant" = color_scheme[2]
+      )
+    ) +
+    ggplot2::labs(
+      title = title,
+      x = "Fold change (Log2)",
+      y = "p-value (-Log10)"
+    ) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold"),
+      axis.text.x = ggplot2::element_text(vjust = 0.4, hjust = 1),
+      axis.text.y = ggplot2::element_text(vjust = 0.4, hjust = 1),
+      legend.title = ggplot2::element_blank(),
+      legend.position = "right",
+      text = ggplot2::element_text(size = 10)
+    ) +
+    ggplot2::geom_vline(
+      xintercept = c(-effect_cutoff, effect_cutoff),
+      linetype = "dashed"
+    ) +
+    ggplot2::geom_hline(
+      yintercept = -log10(alpha),
+      linetype = "dashed"
+    )
+
+  return(plotly::ggplotly(p, tooltip = "text"))
+}
+```
+
+
+### Mothers
+
+#### incl
+```{r treeclimbR maternal incl TSS, include=FALSE}
+res_scaled_mat_incl <- treeclimbR::runDA(
+  TSE = tse_object_scaled_mat_incl,
+  feature_on_row = TRUE,
+  assay = 1,
+  design_terms = "code"
+  )
+res_table_scaled_mat_incl <- treeclimbR::nodeResult(
+  object = res_scaled_mat_incl,
+  n = Inf
+  )
+candidates_scaled_mat_incl <- treeclimbR::getCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_mat_incl),
+  score_data = res_table_scaled_mat_incl,
+  node_column = "node",
+  p_column = "PValue",
+  sign_column = "logFC"
+  )
+da_results_scaled_mat_incl <- treeclimbR::evalCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_mat_incl),
+  type = "single",
+  levels = candidates_scaled_mat_incl$candidate_list,
+  limit_rej = 0.1,
+  score_data = res_table_scaled_mat_incl,
+  node_column = "node",
+  p_column = "PValue",
+  sign_column = "logFC",
+  use_pseudo_leaf = FALSE
+  )
+
+da_results_scaled_mat_incl$output$names <- TreeSummarizedExperiment::convertNode(
+  phylogenetic_tree_mat,
+  da_results_scaled_mat_incl$output$node
+  )
+```
+
+
+##### Volcano plot
+```{r plot volcano maternal incl TSS, echo=FALSE}
+# permutation based False Discovery Proportion estimation
+fdr_thresh_scaled_mat_incl <- permFDP::permFDP.adjust.threshold(
+  pVals = da_results_scaled_mat_incl$output$PValue,
+  threshold = 0.1,
+  myDesign = ifelse(metadata_mat_incl[colnames(scaled_counts_mat_incl), "code"] == "A Y", 1, 2),
+  intOnly = scaled_counts_mat_incl[da_results_scaled_mat_incl$output$names, ],
+  nPerms = 999
+)
+# plot
+p_scaled_mat_incl <- volcano_plot(
+  da_results_scaled_mat_incl, 
+  alpha = fdr_thresh_scaled_mat_incl, 
+  color_scheme = COLOR_SCHEME, 
+  title = "Differential functions at incl - Mother (TSS transformed)")
+p_scaled_mat_incl
+
+# adjusted p-values plot
+gene_daa_incl <- da_results_scaled_mat_incl$output
+DT::datatable(gene_daa_incl)
+
+gene_volcano_incl <- gene_daa_incl |>
+  mutate(`adj.p`=-log10(`adj.p`)) |>
+  mutate(label=if_else(abs(`logFC`)>2, names, NA_character_)) |>
+  mutate(label=if_else(`adj.p` >1.3, names, NA_character_)) |>
+  mutate(color=if_else(`logFC`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`logFC`, `adj.p`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "treeclimbR, maternal samples at incl, gene counts",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+gene_volcano_incl
+
+```
+
+
+##### GSEA
+```{r GSEA maternal incl TSS, echo=FALSE}
+tmp <- data.frame(da_results_scaled_mat_incl$output[, c("logFC", "names")])
+# the DA lists also include CARD, CAZyme, and HMO genes, but we only have mappings for KEGG atm
+kegg_genes_tmp <- tmp$names %in% gene_anno[gene_anno$database == "KEGG", "anno"]
+tmp <- tmp[kegg_genes_tmp, ]
+gene_list_scaled_mat_incl <- tmp[,1]
+names(gene_list_scaled_mat_incl) <- as.character(tmp[, 2])
+gene_list_scaled_mat_incl <- sort(gene_list_scaled_mat_incl, decreasing = TRUE)
+
+kk_scaled_mat_incl <- clusterProfiler::GSEA(
+  gene_list_scaled_mat_incl, 
+  TERM2GENE = pathway_to_gene,  
+  TERM2NAME = pathway_to_description,
+  pvalueCutoff = 0.1,
+  minGSSize = 1
+  )
+DT::datatable(kk_scaled_mat_incl@result)
+vis <- nrow(kk_scaled_mat_incl@result) > 0 # only run plots if there are results
+
+enrich_incl <- enrichplot::dotplot(
+  kk_scaled_mat_incl, 
+  x = "enrichmentScore", 
+  title = "Differential pathways at incl - Mother"
+  ) + xlim(-1, 1)
+
+enrichplot::ridgeplot(kk_scaled_mat_incl)
+
+```
+
+
+#### tri3
+```{r treeclimbR maternal tri3 TSS, include=FALSE}
+res_scaled_mat_tri3 <- treeclimbR::runDA(
+  TSE = tse_object_scaled_mat_tri3,
+  feature_on_row = TRUE,
+  assay = 1,
+  design_terms = "code"
+  )
+res_table_scaled_mat_tri3 <- treeclimbR::nodeResult(
+  object = res_scaled_mat_tri3,
+  n = Inf
+  )
+candidates_scaled_mat_tri3 <- treeclimbR::getCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_mat_tri3),
+  score_data = res_table_scaled_mat_tri3,
+  node_column = "node",
+  p_column = "PValue",
+  sign_column = "logFC"
+  )
+da_results_scaled_mat_tri3 <- treeclimbR::evalCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_mat_tri3),
+  type = "single",
+  levels = candidates_scaled_mat_tri3$candidate_list,
+  limit_rej = 0.1,
+  score_data = res_table_scaled_mat_tri3,
+  node_column = "node",
+  p_column = "PValue",
+  sign_column = "logFC",
+  use_pseudo_leaf = FALSE
+  )
+
+da_results_scaled_mat_tri3$output$names <- TreeSummarizedExperiment::convertNode(
+  phylogenetic_tree_mat,
+  da_results_scaled_mat_tri3$output$node
+  )
+```
+
+##### Volcano plot
+```{r plot volcano maternal tri3 TSS, echo=FALSE}
+# permutation based False Discovery Proportion estimation
+fdr_thresh_scaled_mat_tri3 <- permFDP::permFDP.adjust.threshold(
+  pVals = da_results_scaled_mat_tri3$output$PValue,
+  threshold = 0.1,
+  myDesign = ifelse(metadata_mat_tri3[colnames(scaled_counts_mat_tri3), "code"] == "A Y", 1, 2),
+  intOnly = scaled_counts_mat_tri3[da_results_scaled_mat_tri3$output$names, ],
+  nPerms = 999
+)
+# plot
+p_scaled_mat_tri3 <- volcano_plot(
+  da_results_scaled_mat_tri3, 
+  alpha = fdr_thresh_scaled_mat_tri3, 
+  color_scheme = COLOR_SCHEME, 
+  title = "Differential functions at tri3 - Mother (TSS transformed)")
+p_scaled_mat_tri3
+
+# adjusted p-values plot
+gene_daa_tri3 <- da_results_scaled_mat_tri3$output
+DT::datatable(gene_daa_tri3)
+
+gene_volcano_tri3 <- gene_daa_tri3 |>
+  mutate(`adj.p`=-log10(`adj.p`)) |>
+  mutate(label=if_else(abs(`logFC`)>2, names, NA_character_)) |>
+  mutate(label=if_else(`adj.p` >1.3, names, NA_character_)) |>
+  mutate(color=if_else(`logFC`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`logFC`, `adj.p`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "treeclimbR, maternal samples at tri3, gene counts",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+gene_volcano_tri3
+
+```
+
+
+##### GSEA
+```{r GSEA maternal tri3 TSS, echo=FALSE}
+tmp <- data.frame(da_results_scaled_mat_tri3$output[, c("logFC", "names")])
+# the DA lists also include CARD, CAZyme, and HMO genes, but we only have mappings for KEGG atm
+kegg_genes_tmp <- tmp$names %in% gene_anno[gene_anno$database == "KEGG", "anno"]
+tmp <- tmp[kegg_genes_tmp, ]
+gene_list_scaled_mat_tri3 <- tmp[,1]
+names(gene_list_scaled_mat_tri3) <- as.character(tmp[, 2])
+gene_list_scaled_mat_tri3 <- sort(gene_list_scaled_mat_tri3, decreasing = TRUE)
+
+kk_scaled_mat_tri3 <- clusterProfiler::GSEA(
+  gene_list_scaled_mat_tri3, 
+  TERM2GENE = pathway_to_gene,  
+  TERM2NAME = pathway_to_description,
+  pvalueCutoff = 0.1,
+  minGSSize = 1
+  )
+DT::datatable(kk_scaled_mat_tri3@result)
+vis <- nrow(kk_scaled_mat_tri3@result) > 0 # only run plots if there are results
+
+enrich_tri3 <- enrichplot::dotplot(
+  kk_scaled_mat_tri3, 
+  x = "enrichmentScore", 
+  title = "Differential pathways at tri3 - Mother"
+  ) + xlim(-1, 1)
+
+enrichplot::ridgeplot(kk_scaled_mat_tri3)
+
+```
+
+
+#### pn12m
+```{r treeclimbR maternal pn12m TSS, include=FALSE}
+res_scaled_mat_pn12 <- treeclimbR::runDA(
+  TSE = tse_object_scaled_mat_pn12,
+  feature_on_row = TRUE,
+  assay = 1,
+  design_terms = "code"
+  )
+res_table_scaled_mat_pn12 <- treeclimbR::nodeResult(
+  object = res_scaled_mat_pn12,
+  n = Inf
+  )
+candidates_scaled_mat_pn12 <- treeclimbR::getCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_mat_pn12),
+  score_data = res_table_scaled_mat_pn12,
+  node_column = "node",
+  p_column = "PValue",
+  sign_column = "logFC"
+  )
+da_results_scaled_mat_pn12 <- treeclimbR::evalCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_mat_pn12),
+  type = "single",
+  levels = candidates_scaled_mat_pn12$candidate_list,
+  limit_rej = 0.1,
+  score_data = res_table_scaled_mat_pn12,
+  node_column = "node",
+  p_column = "PValue",
+  sign_column = "logFC",
+  use_pseudo_leaf = FALSE
+  )
+
+da_results_scaled_mat_pn12$output$names <- TreeSummarizedExperiment::convertNode(
+  phylogenetic_tree_mat,
+  da_results_scaled_mat_pn12$output$node
+  )
+```
+
+##### Volcano plot
+```{r plot volcano maternal pn12 TSS, echo=FALSE}
+# permutation based False Discovery Proportion estimation
+fdr_thresh_scaled_mat_pn12 <- permFDP::permFDP.adjust.threshold(
+  pVals = da_results_scaled_mat_pn12$output$PValue,
+  threshold = 0.1,
+  myDesign = ifelse(metadata_mat_pn12[colnames(scaled_counts_mat_pn12), "code"] == "A Y", 1, 2),
+  intOnly = scaled_counts_mat_pn12[da_results_scaled_mat_pn12$output$names, ],
+  nPerms = 999
+)
+# plot
+p_scaled_mat_pn12 <- volcano_plot(
+  da_results_scaled_mat_pn12, 
+  alpha = fdr_thresh_scaled_mat_pn12, 
+  color_scheme = COLOR_SCHEME, 
+  title = "Differential functions at pn12 - Mother (TSS transformed)")
+p_scaled_mat_pn12
+
+# adjusted p-values plot
+gene_daa_pn12m <- da_results_scaled_mat_pn12$output
+DT::datatable(gene_daa_pn12m)
+
+gene_volcano_pn12m <- gene_daa_pn12m |>
+  mutate(`adj.p`=-log10(`adj.p`)) |>
+  mutate(label=if_else(abs(`logFC`)>2, names, NA_character_)) |>
+  mutate(label=if_else(`adj.p` >1.3, names, NA_character_)) |>
+  mutate(color=if_else(`logFC`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`logFC`, `adj.p`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "treeclimbR, maternal samples at pn12m, gene counts",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+gene_volcano_pn12m
+
+```
+
+
+##### GSEA
+```{r GSEA maternal pn12 TSS, echo=FALSE}
+tmp <- data.frame(da_results_scaled_mat_pn12$output[, c("logFC", "names")])
+# the DA lists also include CARD, CAZyme, and HMO genes, but we only have mappings for KEGG atm
+kegg_genes_tmp <- tmp$names %in% gene_anno[gene_anno$database == "KEGG", "anno"]
+tmp <- tmp[kegg_genes_tmp, ]
+gene_list_scaled_mat_pn12 <- tmp[,1]
+names(gene_list_scaled_mat_pn12) <- as.character(tmp[, 2])
+gene_list_scaled_mat_pn12 <- sort(gene_list_scaled_mat_pn12, decreasing = TRUE)
+
+kk_scaled_mat_pn12 <- clusterProfiler::GSEA(
+  gene_list_scaled_mat_pn12, 
+  TERM2GENE = pathway_to_gene,  
+  TERM2NAME = pathway_to_description,
+  pvalueCutoff = 0.1,
+  minGSSize = 1
+  )
+DT::datatable(kk_scaled_mat_pn12@result)
+vis <- nrow(kk_scaled_mat_pn12@result) > 0 # only run plots if there are results
+
+enrich_pn12m <- enrichplot::dotplot(
+  kk_scaled_mat_pn12, 
+  x = "enrichmentScore", 
+  title = "Differential pathways at pn12 - Mother"
+  ) + xlim(-1, 1)
+enrichplot::ridgeplot(kk_scaled_mat_pn12)
+
+```
+
+
+#### pn56m
+```{r treeclimbR maternal pn56m TSS, include=FALSE}
+res_scaled_mat_pn56 <- treeclimbR::runDA(
+  TSE = tse_object_scaled_mat_pn56,
+  feature_on_row = TRUE,
+  assay = 1,
+  design_terms = "code"
+  )
+res_table_scaled_mat_pn56 <- treeclimbR::nodeResult(
+  object = res_scaled_mat_pn56,
+  n = Inf
+  )
+candidates_scaled_mat_pn56 <- treeclimbR::getCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_mat_pn56),
+  score_data = res_table_scaled_mat_pn56,
+  node_column = "node",
+  p_column = "PValue",
+  sign_column = "logFC"
+  )
+da_results_scaled_mat_pn56 <- treeclimbR::evalCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_mat_pn56),
+  type = "single",
+  levels = candidates_scaled_mat_pn56$candidate_list,
+  limit_rej = 0.1,
+  score_data = res_table_scaled_mat_pn56,
+  node_column = "node",
+  p_column = "PValue",
+  sign_column = "logFC",
+  use_pseudo_leaf = FALSE
+  )
+
+da_results_scaled_mat_pn56$output$names <- TreeSummarizedExperiment::convertNode(
+  phylogenetic_tree_mat,
+  da_results_scaled_mat_pn56$output$node
+  )
+```
+
+##### Volcano plot
+```{r plot volcano maternal pn56 TSS, echo=FALSE}
+# permutation based False Discovery Proportion estimation
+fdr_thresh_scaled_mat_pn56 <- permFDP::permFDP.adjust.threshold(
+  pVals = da_results_scaled_mat_pn56$output$PValue,
+  threshold = 0.1,
+  myDesign = ifelse(metadata_mat_pn56[colnames(scaled_counts_mat_pn56), "code"] == "A Y", 1, 2),
+  intOnly = scaled_counts_mat_pn56[da_results_scaled_mat_pn56$output$names, ],
+  nPerms = 999
+)
+# plot
+p_scaled_mat_pn56 <- volcano_plot(
+  da_results_scaled_mat_pn56, 
+  alpha = fdr_thresh_scaled_mat_pn56, 
+  color_scheme = COLOR_SCHEME, 
+  title = "Differential functions at pn56 - Mother (TSS transformed)")
+p_scaled_mat_pn56
+
+# adjusted p-values plot
+gene_daa_pn56m <- da_results_scaled_mat_pn56$output
+DT::datatable(gene_daa_pn56m)
+
+gene_volcano_pn56m <- gene_daa_pn56m |>
+  mutate(`adj.p`=-log10(`adj.p`)) |>
+  mutate(label=if_else(abs(`logFC`)>2, names, NA_character_)) |>
+  mutate(label=if_else(`adj.p` >1.3, names, NA_character_)) |>
+  mutate(color=if_else(`logFC`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`logFC`, `adj.p`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "treeclimbR, maternal samples at pn56m, gene counts",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+gene_volcano_pn56m
+
+```
+
+
+##### GSEA
+```{r GSEA maternal pn56 TSS, echo=FALSE}
+tmp <- data.frame(da_results_scaled_mat_pn56$output[, c("logFC", "names")])
+# the DA lists also include CARD, CAZyme, and HMO genes, but we only have mappings for KEGG atm
+kegg_genes_tmp <- tmp$names %in% gene_anno[gene_anno$database == "KEGG", "anno"]
+tmp <- tmp[kegg_genes_tmp, ]
+gene_list_scaled_mat_pn56 <- tmp[,1]
+names(gene_list_scaled_mat_pn56) <- as.character(tmp[, 2])
+gene_list_scaled_mat_pn56 <- sort(gene_list_scaled_mat_pn56, decreasing = TRUE)
+
+kk_scaled_mat_pn56 <- clusterProfiler::GSEA(
+  gene_list_scaled_mat_pn56, 
+  TERM2GENE = pathway_to_gene,  
+  TERM2NAME = pathway_to_description,
+  pvalueCutoff = 0.1,
+  minGSSize = 1
+  )
+DT::datatable(kk_scaled_mat_pn56@result)
+vis <- nrow(kk_scaled_mat_pn56@result) > 0 # only run plots if there are results
+
+enrich_pn56m <- enrichplot::dotplot(
+  kk_scaled_mat_pn56, 
+  x = "enrichmentScore", 
+  title = "Differential pathways at pn56m - Mother"
+  ) + xlim(-1, 1)
+
+enrichplot::ridgeplot(kk_scaled_mat_pn56)
+
+```
+
+
+### Infants
+
+We first look for differentially abundant genes between treatment groups in the infants.
+
+#### pn12e 
+```{r treeclimbR infants pn12 TSS, include=FALSE}
+res_scaled_inf_pn12 <- treeclimbR::runDA(
+  TSE = tse_object_scaled_inf_pn12,
+  feature_on_row = TRUE,
+  assay = 1,
+  design_terms = "code"
+  )
+res_table_scaled_inf_pn12 <- treeclimbR::nodeResult(
+  object = res_scaled_inf_pn12,
+  n = Inf
+  )
+candidates_scaled_inf_pn12 <- treeclimbR::getCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_inf_pn12),
+  score_data = res_table_scaled_inf_pn12,
+  node_column = "node",
+  p_column = "PValue",
+  sign_column = "logFC"
+  )
+da_results_scaled_inf_pn12 <- treeclimbR::evalCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_inf_pn12),
+  type = "single",
+  levels = candidates_scaled_inf_pn12$candidate_list,
+  limit_rej = 0.1,
+  score_data = res_table_scaled_inf_pn12,
+  node_column = "node",
+  p_column = "PValue",
+  sign_column = "logFC",
+  use_pseudo_leaf = FALSE
+  )
+
+da_results_scaled_inf_pn12$output$names <- TreeSummarizedExperiment::convertNode(
+  phylogenetic_tree_inf,
+  da_results_scaled_inf_pn12$output$node
+  )
+```
+
+##### Volcano plot
+```{r plot volcano infants pn12 TSS, echo=FALSE}
+# permutation based False Discovery Proportion estimation
+fdr_thresh_scaled_inf_pn12 <- permFDP::permFDP.adjust.threshold(
+  pVals = da_results_scaled_inf_pn12$output$PValue,
+  threshold = 0.1,
+  myDesign = ifelse(metadata_inf_pn12[colnames(scaled_counts_inf_pn12), "code"] == "A Y", 1, 2),
+  intOnly = scaled_counts_inf_pn12[da_results_scaled_inf_pn12$output$names, ],
+  nPerms = 999
+)
+# plot
+p_scaled_inf_pn12 <- volcano_plot(
+  da_results_scaled_inf_pn12,  
+  alpha = fdr_thresh_scaled_inf_pn12,
+  color_scheme = COLOR_SCHEME, 
+  title = "Differential functions at pn12 - Infant (TSS transformed)")
+p_scaled_inf_pn12
+
+# adjusted p-values plot
+gene_daa_pn12e <- da_results_scaled_inf_pn12$output
+DT::datatable(gene_daa_pn12e)
+
+gene_volcano_pn12e <- gene_daa_pn12e |>
+  mutate(`adj.p`=-log10(`adj.p`)) |>
+  mutate(label=if_else(abs(`logFC`)>2, names, NA_character_)) |>
+  mutate(label=if_else(`adj.p` >1.3, names, NA_character_)) |>
+  mutate(color=if_else(`logFC`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`logFC`, `adj.p`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "treeclimbR, infant samples at pn12e, gene counts",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+gene_volcano_pn12e
+
+```
+
+
+##### GSEA
+```{r GSEA infant pn12 TSS, echo=FALSE}
+tmp <- data.frame(da_results_scaled_inf_pn12$output[, c("logFC", "names")])
+# the DA lists also include CARD, CAZyme, and HMO genes, but we only have mappings for KEGG atm
+kegg_genes_tmp <- tmp$names %in% gene_anno[gene_anno$database == "KEGG", "anno"]
+tmp <- tmp[kegg_genes_tmp, ]
+gene_list_scaled_inf_pn12 <- tmp[,1]
+names(gene_list_scaled_inf_pn12) <- as.character(tmp[, 2])
+gene_list_scaled_inf_pn12 <- sort(gene_list_scaled_inf_pn12, decreasing = TRUE)
+#GSEA
+kk_scaled_inf_pn12 <- clusterProfiler::GSEA(
+  geneList = gene_list_scaled_inf_pn12, 
+  minGSSize = 1,
+  pvalueCutoff = 0.1,
+  TERM2GENE = pathway_to_gene, 
+  TERM2NAME = pathway_to_description
+  )
+# output
+DT::datatable(kk_scaled_inf_pn12@result)
+vis <- nrow(kk_scaled_inf_pn12@result) > 0 # only run plots if there are results
+
+enrich_pn12e <- enrichplot::dotplot(
+  kk_scaled_inf_pn12, 
+  x = "enrichmentScore", 
+  title = "Differential pathways at pn12e - Infant"
+  ) + xlim(-1, 1)
+
+enrichplot::ridgeplot(kk_scaled_inf_pn12)
+
+```
+
+The porphyrin ring is the framework for the heme molecule, the oigment in hemoglobin and red blood cells.
+
+
+#### pn56e 
+```{r treeclimbR infants pn56 TSS, include=FALSE}
+res_scaled_inf_pn56 <- treeclimbR::runDA(
+  TSE = tse_object_scaled_inf_pn56,
+  feature_on_row = TRUE,
+  assay = 1,
+  design_terms = "code"
+  )
+res_table_scaled_inf_pn56 <- treeclimbR::nodeResult(
+  object = res_scaled_inf_pn56,
+  n = Inf
+  )
+candidates_scaled_inf_pn56 <- treeclimbR::getCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_inf_pn56),
+  score_data = res_table_scaled_inf_pn56,
+  node_column = "node",
+  p_column = "PValue",
+  sign_column = "logFC"
+  )
+da_results_scaled_inf_pn56 <- treeclimbR::evalCand(
+  tree = TreeSummarizedExperiment::rowTree(tse_object_scaled_inf_pn56),
+  type = "single",
+  levels = candidates_scaled_inf_pn56$candidate_list,
+  limit_rej = 0.1,
+  score_data = res_table_scaled_inf_pn56,
+  node_column = "node",
+  p_column = "PValue",
+  sign_column = "logFC",
+  use_pseudo_leaf = FALSE
+  )
+
+da_results_scaled_inf_pn56$output$names <- TreeSummarizedExperiment::convertNode(
+  phylogenetic_tree_inf,
+  da_results_scaled_inf_pn56$output$node
+  )
+```
+
+##### Volcano plot
+```{r plot volcano infants pn56 TSS, echo=FALSE}
+# permutation based False Discovery Proportion estimation
+fdr_thresh_scaled_inf_pn56 <- permFDP::permFDP.adjust.threshold(
+  pVals = da_results_scaled_inf_pn56$output$PValue,
+  threshold = 0.1,
+  myDesign = ifelse(metadata_inf_pn56[colnames(scaled_counts_inf_pn56), "code"] == "A Y", 1, 2),
+  intOnly = scaled_counts_inf_pn56[da_results_scaled_inf_pn56$output$names, ],
+  nPerms = 999
+)
+# plot
+p_scaled_inf_pn56 <- volcano_plot(
+  da_results_scaled_inf_pn56,  
+  alpha = fdr_thresh_scaled_inf_pn56,
+  color_scheme = COLOR_SCHEME, 
+  title = "Differential functions at pn56 - Infant (TSS transformed)")
+p_scaled_inf_pn56
+
+
+# adjusted p-values plot
+gene_daa_pn56e <- da_results_scaled_inf_pn56$output
+DT::datatable(gene_daa_pn56e)
+
+gene_volcano_pn56e <- gene_daa_pn56e |>
+  mutate(`adj.p`=-log10(`adj.p`)) |>
+  mutate(label=if_else(abs(`logFC`)>2, names, NA_character_)) |>
+  mutate(label=if_else(`adj.p` >1.3, names, NA_character_)) |>
+  mutate(color=if_else(`logFC`>0, "#FF9E4A", "#729ECE")) |>
+  mutate(color=if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`logFC`, `adj.p`, color=I(color), label=label, shape=I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 1.3) +
+  geom_vline(linetype = "dotted", xintercept = 2) +
+  geom_vline(linetype = "dotted", xintercept = -2) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(title = "treeclimbR, infant samples at pn56e, gene counts",
+       x = expression(~Log[2]~FoldChange),
+       y = expression(-~Log[10]~Q)) +
+  theme_bw()
+gene_volcano_pn56e
+
+```
+
+
+##### GSEA
+```{r GSEA infant pn56 TSS, echo=FALSE}
+tmp <- data.frame(da_results_scaled_inf_pn56$output[, c("logFC", "names")])
+# the DA lists also include CARD, CAZyme, and HMO genes, but we only have mappings for KEGG atm
+kegg_genes_tmp <- tmp$names %in% gene_anno[gene_anno$database == "KEGG", "anno"]
+tmp <- tmp[kegg_genes_tmp, ]
+gene_list_scaled_inf_pn56 <- tmp[,1]
+names(gene_list_scaled_inf_pn56) <- as.character(tmp[, 2])
+gene_list_scaled_inf_pn56 <- sort(gene_list_scaled_inf_pn56, decreasing = TRUE)
+#GSEA
+kk_scaled_inf_pn56 <- clusterProfiler::GSEA(
+  geneList = gene_list_scaled_inf_pn56, 
+  minGSSize = 1,
+  pvalueCutoff = 0.1,
+  TERM2GENE = pathway_to_gene, 
+  TERM2NAME = pathway_to_description
+  )
+# output
+DT::datatable(kk_scaled_inf_pn56@result)
+vis <- nrow(kk_scaled_inf_pn56@result) > 0 # only run plots if there are results
+
+enrich_pn56e <- enrichplot::dotplot(
+  kk_scaled_inf_pn56, 
+  x = "enrichmentScore", 
+  title = "Differential pathways at pn56e - Infant"
+  ) + xlim(-1, 1)
+
+enrichplot::ridgeplot(kk_scaled_inf_pn56)
+
+```
+
+
+```{r}
+sessionInfo()
+```
+
